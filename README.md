@@ -18,6 +18,7 @@ This project was built for the **EaseMyTrip Hackathon** under **Google's Gen AI 
 ## 🛠️ Tech Stack
 
 ### Frontend
+
 - **React 19** with modern hooks and context
 - **Tailwind CSS** for responsive design
 - **Framer Motion** for smooth animations
@@ -25,6 +26,7 @@ This project was built for the **EaseMyTrip Hackathon** under **Google's Gen AI 
 - **shadcn/ui** components for beautiful UI
 
 ### Backend
+
 - **FastAPI** for high-performance API
 - **SQLAlchemy** with MySQL 9.0 support
 - **Google Gemini AI** for intelligent trip planning
@@ -32,6 +34,7 @@ This project was built for the **EaseMyTrip Hackathon** under **Google's Gen AI 
 - **Pydantic** for data validation
 
 ### Database
+
 - **MySQL 9.0** for production
 - **SQLite** for development
 - **Alembic** for database migrations
@@ -39,17 +42,20 @@ This project was built for the **EaseMyTrip Hackathon** under **Google's Gen AI 
 ## 🚀 Quick Start
 
 ### Prerequisites
+
 - Node.js 18+ and npm
 - Python 3.8+
 - MySQL 9.0 (optional, SQLite works for development)
 
 ### 1. Clone the Repository
+
 ```bash
 git clone https://github.com/Harshahg20/easemytrip-ai-travel-planner.git
 cd easemytrip-ai-travel-planner
 ```
 
 ### 2. Setup Backend
+
 ```bash
 cd backend
 python3 setup.py
@@ -58,6 +64,7 @@ python3 run.py
 ```
 
 ### 3. Setup Frontend
+
 ```bash
 cd frontend
 npm install
@@ -65,6 +72,7 @@ npm start
 ```
 
 ### 4. Access the Application
+
 - **Frontend**: http://localhost:3000
 - **Backend API**: http://localhost:8000
 - **API Documentation**: http://localhost:8000/docs
@@ -101,6 +109,7 @@ easemytrip-ai-travel-planner/
 ## 🔧 Configuration
 
 ### Environment Variables
+
 Create a `.env` file in the backend directory:
 
 ```env
@@ -121,6 +130,7 @@ ENVIRONMENT=development
 ## 📚 API Documentation
 
 Once the backend is running, visit:
+
 - **Swagger UI**: http://localhost:8000/docs
 - **ReDoc**: http://localhost:8000/redoc
 
@@ -141,7 +151,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🔗 Links
 
 - **GitHub Repository**: https://github.com/Harshahg20/easemytrip-ai-travel-planner
-- **Frontend Branch**: https://github.com/Harshahg20/easemytrip-ai-travel-planner/tree/frontend
+- **Phase 1 Branch**: https://github.com/Harshahg20/easemytrip-ai-travel-planner/tree/phase1
 - **EaseMyTrip**: https://www.easemytrip.com/
 - **Google AI Studio**: https://aistudio.google.com/
 
