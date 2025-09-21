@@ -1,29 +1,32 @@
-# EaseMyTrip AI Travel Planner
+# Tripora - AI Travel Planner
 
 Smart travel planning app using Google AI to generate personalized trip itineraries and recommendations
 
 ## 🌟 About
 
-This project was built for the **EaseMyTrip Hackathon** under **Google's Gen AI Exchange**. It's a full-stack AI-powered travel planning platform that leverages Google's latest AI technologies to create personalized travel experiences.
+**Tripora** is a full-stack AI-powered travel planning platform built for the **EaseMyTrip Hackathon** under **Google's Gen AI Exchange**. It leverages Google's latest AI technologies to create personalized travel experiences.
 
 ### 🎯 Hackathon Requirements & Google Gemini AI Integration
 
-**MANDATORY REQUIREMENT**: This project extensively uses **Google Gemini AI API** as required by the EaseMyTrip Hackathon under Google's Gen AI Exchange. The integration demonstrates the power of Google's latest AI technology in revolutionizing travel planning.
+**MANDATORY REQUIREMENT**: Tripora extensively uses **Google Gemini AI API** as required by the EaseMyTrip Hackathon under Google's Gen AI Exchange. The integration demonstrates the power of Google's latest AI technology in revolutionizing travel planning.
 
 #### **Google Gemini AI Usage & Purpose**:
 
-1. **Intelligent Trip Planning**: 
+1. **Intelligent Trip Planning**:
+
    - Generates multiple personalized trip options (Adventure, Cultural, Balanced themes)
    - Creates detailed day-by-day itineraries with activities, meals, and accommodations
    - Provides context-aware recommendations based on user preferences
 
 2. **Smart Content Generation**:
+
    - AI-powered activity suggestions with descriptions and timing
    - Restaurant recommendations with cuisine types and cost estimates
    - Accommodation suggestions with amenities and pricing
    - Transportation options with routes and duration
 
 3. **Personalized Travel Assistant**:
+
    - Understands user preferences and travel themes
    - Adapts recommendations based on budget and traveler count
    - Provides local insights and travel tips
@@ -118,7 +121,7 @@ npm start
 ## 📁 Project Structure
 
 ```
-easemytrip-ai-travel-planner/
+tripora/
 ├── frontend/                 # React frontend application
 │   ├── src/
 │   │   ├── components/      # Reusable UI components
@@ -173,15 +176,10 @@ This project was built for the EaseMyTrip Hackathon. Feel free to explore the co
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
-
-- **Google AI** for providing the Gemini API (MANDATORY requirement for hackathon)
-- **EaseMyTrip** for organizing the hackathon under Google Gen AI Exchange
-- **The open-source community** for amazing tools and libraries
 
 ## 🎯 Hackathon Compliance
 
-This project fully complies with the EaseMyTrip Hackathon requirements:
+Tripora fully complies with the EaseMyTrip Hackathon requirements:
 
 ✅ **Google Gemini AI Integration**: Extensively used for trip planning and content generation  
 ✅ **Real-world Application**: Demonstrates practical use of AI in travel industry  
@@ -198,4 +196,4 @@ This project fully complies with the EaseMyTrip Hackathon requirements:
 
 ---
 
-**Built with ❤️ for the EaseMyTrip Hackathon under Google Gen AI Exchange**
+**Tripora - Built with ❤️ for the EaseMyTrip Hackathon under Google Gen AI Exchange**
