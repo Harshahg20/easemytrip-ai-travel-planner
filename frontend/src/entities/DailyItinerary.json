@@ -1,0 +1,149 @@
+{
+  "name": "DailyItinerary",
+  "type": "object",
+  "properties": {
+    "trip_id": {
+      "type": "string",
+      "description": "Reference to the main trip"
+    },
+    "day_number": {
+      "type": "number",
+      "description": "Day number in the trip (1, 2, 3...)"
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "description": "Date for this day"
+    },
+    "daily_budget": {
+      "type": "number",
+      "description": "Allocated budget for this day"
+    },
+    "activities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "time": {
+            "type": "string"
+          },
+          "activity": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "string"
+          },
+          "cost": {
+            "type": "number"
+          },
+          "description": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "coordinates": {
+            "type": "object",
+            "properties": {
+              "lat": {
+                "type": "number"
+              },
+              "lng": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    "meals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "meal_type": {
+            "type": "string"
+          },
+          "restaurant": {
+            "type": "string"
+          },
+          "cuisine": {
+            "type": "string"
+          },
+          "cost": {
+            "type": "number"
+          },
+          "location": {
+            "type": "string"
+          },
+          "coordinates": {
+            "type": "object",
+            "properties": {
+              "lat": {
+                "type": "number"
+              },
+              "lng": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    "accommodation": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "location": {
+          "type": "string"
+        },
+        "coordinates": {
+          "type": "object",
+          "properties": {
+            "lat": {
+              "type": "number"
+            },
+            "lng": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+    "transportation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "cost": {
+            "type": "number"
+          },
+          "duration": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "required": ["trip_id", "day_number", "date"]
+}

@@ -1,0 +1,86 @@
+{
+  "name": "Trip",
+  "type": "object",
+  "properties": {
+    "destination": {
+      "type": "string",
+      "description": "Travel destination city/state in India"
+    },
+    "start_date": {
+      "type": "string",
+      "format": "date",
+      "description": "Trip start date"
+    },
+    "end_date": {
+      "type": "string",
+      "format": "date",
+      "description": "Trip end date"
+    },
+    "total_budget": {
+      "type": "number",
+      "description": "Total trip budget in INR"
+    },
+    "currency": {
+      "type": "string",
+      "default": "INR",
+      "description": "Budget currency"
+    },
+    "travelers": {
+      "type": "number",
+      "description": "Number of travelers"
+    },
+    "themes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Travel themes (heritage, nightlife, adventure, etc.)"
+    },
+    "accommodation_preference": {
+      "type": "string",
+      "enum": ["budget", "mid-range", "luxury"],
+      "default": "mid-range"
+    },
+    "transportation_preference": {
+      "type": "string",
+      "enum": ["public", "private", "mixed"],
+      "default": "mixed"
+    },
+    "language": {
+      "type": "string",
+      "enum": ["english", "hindi"],
+      "default": "english"
+    },
+    "special_requirements": {
+      "type": "string",
+      "description": "Special needs or requirements"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "planning", "booked", "completed"],
+      "default": "draft"
+    },
+    "trip_options": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Multiple trip plan options for user to choose from"
+    },
+    "selected_plan": {
+      "type": "object",
+      "description": "The full object of the selected trip plan"
+    },
+    "booking_reference": {
+      "type": "string",
+      "description": "Booking reference from the provider (e.g., EaseMyTrip)"
+    }
+  },
+  "required": [
+    "destination",
+    "start_date",
+    "end_date",
+    "total_budget",
+    "travelers"
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "name": "Booking",
+  "type": "object",
+  "properties": {
+    "trip_id": {
+      "type": "string",
+      "description": "Reference to the main trip"
+    },
+    "booking_type": {
+      "type": "string",
+      "enum": ["accommodation", "transport", "activity", "package"],
+      "description": "Type of booking"
+    },
+    "provider": {
+      "type": "string",
+      "description": "EMT provider name"
+    },
+    "service_name": {
+      "type": "string",
+      "description": "Name of the service booked"
+    },
+    "booking_date": {
+      "type": "string",
+      "format": "date",
+      "description": "Date of service"
+    },
+    "cost": {
+      "type": "number",
+      "description": "Cost of this booking"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "confirmed", "cancelled"],
+      "default": "pending"
+    },
+    "emt_reference": {
+      "type": "string",
+      "description": "EMT inventory reference"
+    },
+    "confirmation_details": {
+      "type": "object",
+      "description": "Booking confirmation details"
+    }
+  },
+  "required": ["trip_id", "booking_type", "provider", "service_name", "cost"]
+}
