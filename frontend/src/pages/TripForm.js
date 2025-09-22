@@ -1,11 +1,11 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Progress } from "../components/ui/progress";
+// import { Progress } from "../components/ui/progress";
 import { Button } from "../components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Card, CardContent } from "../components/ui/card";
 import { createPageUrl } from "../utils";
-import { Trip } from "../entities/Trip";
+import { tripService } from "../services/api";
 import {
   AlertCircle,
   ArrowLeft,
@@ -460,38 +460,35 @@ export default function TripForm() {
     setError("");
 
     try {
-      // Prepare a trip object for the option generation function
-      // It needs the specific fields used by generateMultipleTripOptions
-      const tripForOptionGeneration = {
+      // Create the trip first
+      const tripData = {
         destination: formData.destination,
-        start_date: formData.start_date,
-        end_date: formData.end_date,
-        total_budget: parseFloat(formData.total_budget),
-        accommodation_preference: formData.accommodation_preference,
-      };
-
-      // Generate the trip options
-      const generatedOptions = generateMultipleTripOptions(
-        tripForOptionGeneration
-      );
-
-      // Create the trip, including the generated options
-      const createdTrip = await Trip.create({
-        destination: formData.destination,
-        start_date: formData.start_date,
-        end_date: formData.end_date,
+        start_date: new Date(formData.start_date).toISOString(),
+        end_date: new Date(formData.end_date).toISOString(),
         total_budget: parseFloat(formData.total_budget),
         currency: formData.currency,
         travelers: parseInt(formData.travelers, 10),
         themes: formData.themes,
         accommodation_preference: formData.accommodation_preference,
         transportation_preference: formData.transportation_preference,
+        food_preference: "mixed", // Default value
         special_requirements: formData.special_requirements,
-        status: "draft",
-        options_data: generatedOptions, // Add the generated options here
-      });
+      };
 
-      navigate(createPageUrl(`TripOptions?trip_id=${createdTrip.id}`));
+      console.log("Creating trip with data:", tripData);
+      const createdTrip = await tripService.createTrip(tripData);
+      console.log("Trip created successfully:", createdTrip);
+
+      // Generate trip options using AI
+      console.log("Generating trip options...");
+      const tripOptions = await tripService.generateTripOptions(
+        createdTrip.id,
+        {}
+      );
+      console.log("Trip options generated:", tripOptions);
+
+      // Navigate to trip options page
+      navigate(`/trip-options?trip_id=${createdTrip.id}`);
     } catch (err) {
       console.error("Error creating trip:", err);
       setError(

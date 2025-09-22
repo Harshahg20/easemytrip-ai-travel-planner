@@ -5,15 +5,7 @@ import {
   LanguageProvider,
   useLanguage,
 } from "./components/language/LanguageProvider";
-import {
-  MapPin,
-  Calendar,
-  DollarSign,
-  User,
-  Menu,
-  X,
-  Globe,
-} from "lucide-react";
+import { MapPin, Calendar, DollarSign, User, Menu, Globe } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "./components/ui/sheet";
 import {
   DropdownMenu,

@@ -7,23 +7,23 @@ from ..core.database import Base
 class Trip(Base):
     __tablename__ = "trips"
     
-    id = Column(String, primary_key=True, index=True)
-    destination = Column(String, nullable=False)
+    id = Column(String(255), primary_key=True, index=True)
+    destination = Column(String(255), nullable=False)
     start_date = Column(DateTime, nullable=False)
     end_date = Column(DateTime, nullable=False)
     total_budget = Column(Float, nullable=False)
-    currency = Column(String, default="INR")
+    currency = Column(String(10), default="INR")
     travelers = Column(Integer, nullable=False)
     themes = Column(JSON)  # List of themes like ["adventure", "cultural"]
     
     # Preferences
-    accommodation_preference = Column(String, default="mid-range")
-    transportation_preference = Column(String, default="mixed")
-    food_preference = Column(String, default="mixed")
+    accommodation_preference = Column(String(50), default="mid-range")
+    transportation_preference = Column(String(50), default="mixed")
+    food_preference = Column(String(50), default="mixed")
     special_requirements = Column(Text)
     
     # Status and metadata
-    status = Column(String, default="draft")  # draft, planned, booked, completed
+    status = Column(String(50), default="draft")  # draft, planned, booked, completed
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
@@ -35,8 +35,8 @@ class Trip(Base):
 class DailyItinerary(Base):
     __tablename__ = "daily_itineraries"
     
-    id = Column(String, primary_key=True, index=True)
-    trip_id = Column(String, ForeignKey("trips.id"), nullable=False)
+    id = Column(String(255), primary_key=True, index=True)
+    trip_id = Column(String(255), ForeignKey("trips.id"), nullable=False)
     day_number = Column(Integer, nullable=False)
     date = Column(DateTime, nullable=False)
     daily_budget = Column(Float)
@@ -57,10 +57,10 @@ class DailyItinerary(Base):
 class TripOption(Base):
     __tablename__ = "trip_options"
     
-    id = Column(String, primary_key=True, index=True)
-    trip_id = Column(String, ForeignKey("trips.id"), nullable=False)
-    option_name = Column(String, nullable=False)  # e.g., "Adventure", "Cultural", "Balanced"
-    theme = Column(String, nullable=False)  # adventure, cultural, balanced
+    id = Column(String(255), primary_key=True, index=True)
+    trip_id = Column(String(255), ForeignKey("trips.id"), nullable=False)
+    option_name = Column(String(255), nullable=False)  # e.g., "Adventure", "Cultural", "Balanced"
+    theme = Column(String(50), nullable=False)  # adventure, cultural, balanced
     description = Column(Text)
     
     # Option details stored as JSON
@@ -68,7 +68,7 @@ class TripOption(Base):
     total_cost = Column(Float)
     highlights = Column(JSON)  # List of highlights
     
-    is_selected = Column(String, default=False)  # True if this is the selected option
+    is_selected = Column(String(10), default="False")  # True if this is the selected option
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     

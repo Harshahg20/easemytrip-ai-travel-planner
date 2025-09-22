@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { createPageUrl } from "../utils";
-import { Trip } from "../entities/Trip";
+import { tripService } from "../services/api";
 import { Button } from "../components/ui/button";
 import {
   Sparkles,
@@ -18,7 +18,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useLanguage } from "../components/language/LanguageProvider";
 import TripOptionCard from "../components/trip-options/TripOptionCard";
 import CustomizationPanel from "../components/trip-options/CustomizationPanel";
-import { generateMultipleTripOptions } from "../pages/TripForm";
+// import { generateMultipleTripOptions } from "../pages/TripForm";
 
 export default function TripOptions() {
   const navigate = useNavigate();
@@ -42,25 +42,22 @@ export default function TripOptions() {
         return;
       }
 
-      // Use filter method to get specific trip by ID
-      const trips = await Trip.filter({ id: tripId });
-      const fetchedTrip = trips[0]; // Assuming ID is unique, take the first result
-
+      // Fetch trip data from API
+      const fetchedTrip = await tripService.getTrip(tripId);
       if (!fetchedTrip) {
         setError("Trip not found.");
         setLoading(false);
         return;
       }
 
-      if (!fetchedTrip.trip_options || fetchedTrip.trip_options.length === 0) {
-        const options = generateMultipleTripOptions(fetchedTrip);
-        const updatedTrip = await Trip.update(tripId, {
-          trip_options: options,
-        });
-        setTrip(updatedTrip);
-      } else {
-        setTrip(fetchedTrip);
-      }
+      // Fetch trip options from API
+      const tripOptions = await tripService.getTripOptions(tripId);
+
+      // Set trip data with options
+      setTrip({
+        ...fetchedTrip,
+        trip_options: tripOptions,
+      });
     } catch (err) {
       console.error("Error fetching trip:", err);
       setError("Failed to load trip data. Please try again.");
@@ -76,9 +73,14 @@ export default function TripOptions() {
   const handleRegenerateOptions = async () => {
     setRegenerating(true);
     try {
-      const options = generateMultipleTripOptions(trip);
-      const updatedTrip = await Trip.update(trip.id, { trip_options: options });
-      setTrip(updatedTrip);
+      // Regenerate trip options using API
+      const newOptions = await tripService.generateTripOptions(trip.id, {});
+
+      // Update local state with new options
+      setTrip({
+        ...trip,
+        trip_options: newOptions,
+      });
     } catch (err) {
       console.error("Error regenerating options:", err);
       setError("Failed to regenerate options.");
@@ -89,11 +91,11 @@ export default function TripOptions() {
 
   const handleSelectOption = async (option) => {
     try {
-      await Trip.update(trip.id, {
-        selected_plan: option,
-        // Status remains 'draft' until explicitly booked by the user
-      });
-      navigate(createPageUrl(`TripPlanner?trip_id=${trip.id}`));
+      // Select the trip option using API
+      await tripService.selectTripOption(trip.id, option.id);
+
+      // Navigate to trip planner
+      navigate(`/trip-planner?trip_id=${trip.id}&option_id=${option.id}`);
     } catch (err) {
       console.error("Error selecting option:", err);
       setError("Could not select this plan. Please try again.");
@@ -106,14 +108,22 @@ export default function TripOptions() {
   };
 
   const handleSaveCustomization = async (customizedOption) => {
-    const updatedOptions = trip.trip_options.map((opt) =>
-      opt.id === customizedOption.id ? customizedOption : opt
-    );
     try {
-      const updatedTrip = await Trip.update(trip.id, {
-        trip_options: updatedOptions,
+      // Update the trip option using API
+      await tripService.updateTrip(trip.id, {
+        trip_options: trip.trip_options.map((opt) =>
+          opt.id === customizedOption.id ? customizedOption : opt
+        ),
       });
-      setTrip(updatedTrip);
+
+      // Update local state
+      setTrip({
+        ...trip,
+        trip_options: trip.trip_options.map((opt) =>
+          opt.id === customizedOption.id ? customizedOption : opt
+        ),
+      });
+
       setIsCustomizing(false);
       setOptionToCustomize(null);
     } catch (err) {

@@ -22,20 +22,36 @@ export default function TripOptionCard({
         </div>
         <div>
           <CardTitle className="text-xl font-bold text-slate-800">
-            {t(`option_${option.id}_name`)}
+            {option.option_name || option.name || "Trip Option"}
           </CardTitle>
           <Badge
             variant="secondary"
             className="mt-1 bg-slate-100 text-slate-600"
           >
-            {option.focus}
+            {option.theme || option.focus || "Travel"}
           </Badge>
         </div>
       </CardHeader>
       <CardContent className="flex flex-col flex-grow">
         <p className="text-slate-600 mb-4 text-sm min-h-[60px]">
-          {t(`option_${option.id}_desc`)}
+          {option.description || "A wonderful travel experience awaits you."}
         </p>
+
+        {/* Highlights */}
+        {option.highlights && option.highlights.length > 0 && (
+          <div className="mb-4">
+            <h4 className="text-sm font-semibold text-slate-700 mb-2">
+              Highlights:
+            </h4>
+            <div className="flex flex-wrap gap-1">
+              {option.highlights.map((highlight, index) => (
+                <Badge key={index} variant="outline" className="text-xs">
+                  {highlight}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="flex justify-between items-center mb-6 p-3 bg-slate-50 rounded-lg">
           <span className="text-sm font-medium text-slate-600">
@@ -43,7 +59,7 @@ export default function TripOptionCard({
           </span>
           <span className="text-lg font-bold text-slate-800 flex items-center">
             <DollarSign className="w-4 h-4 mr-1 text-emerald-600" />
-            {option.total_estimated_cost.toLocaleString()}
+            {option.total_cost?.toLocaleString() || "0"}
           </span>
         </div>
 

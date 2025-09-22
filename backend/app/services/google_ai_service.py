@@ -9,17 +9,26 @@ logger = logging.getLogger(__name__)
 
 class GoogleAIService:
     def __init__(self):
-        if not settings.google_ai_api_key:
+        if not settings.google_ai_api_key or settings.google_ai_api_key == "your_google_ai_studio_api_key_here":
             logger.warning("Google AI API key not configured")
+            self.model = None
             return
         
-        genai.configure(api_key=settings.google_ai_api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        try:
+            genai.configure(api_key=settings.google_ai_api_key)
+            self.model = genai.GenerativeModel('gemini-1.5-flash')
+        except Exception as e:
+            logger.error(f"Error initializing Google AI service: {e}")
+            self.model = None
     
     async def generate_trip_options(self, trip_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Generate multiple trip options using Google Gemini AI
         """
+        if not self.model:
+            logger.warning("Google AI model not available, using fallback options")
+            return self._get_fallback_trip_options(trip_data)
+        
         try:
             prompt = self._create_trip_options_prompt(trip_data)
             response = await self._generate_content(prompt)
@@ -249,8 +258,8 @@ class GoogleAIService:
     
     async def _generate_content(self, prompt: str) -> str:
         """Generate content using Gemini AI"""
-        if not settings.google_ai_api_key:
-            raise Exception("Google AI API key not configured")
+        if not self.model:
+            raise Exception("Google AI model not available")
         
         response = self.model.generate_content(prompt)
         return response.text
@@ -299,12 +308,129 @@ class GoogleAIService:
     
     def _get_fallback_trip_options(self, trip_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Fallback trip options when AI fails"""
+        destination = trip_data.get('destination', 'India')
+        duration = trip_data.get('duration', 3)
+        budget_per_day = trip_data.get('total_budget', 50000) / duration
+        
+        # Calculate actual trip dates
+        start_date = trip_data.get('start_date')
+        if start_date:
+            from datetime import datetime, timedelta
+            if isinstance(start_date, str):
+                start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            elif hasattr(start_date, 'date'):
+                start_date = start_date
+            else:
+                start_date = datetime.now()
+        else:
+            start_date = datetime.now()
+        
+        # Generate sample daily itineraries with unique content for each day
+        daily_itineraries = []
+        
+        # Define different activities, meals, and locations for each day
+        day_activities = [
+            ["City Center Exploration", "Local Market Visit"],
+            ["Historical Monuments Tour", "Art Gallery Visit"],
+            ["Beach Activities", "Water Sports"],
+            ["Mountain Hiking", "Scenic Viewpoints"],
+            ["Cultural Village Tour", "Traditional Crafts Workshop"]
+        ]
+        
+        day_meals = [
+            ["Sunrise Cafe", "Heritage Restaurant", "Rooftop Bistro"],
+            ["Local Dhaba", "Traditional Kitchen", "Garden Restaurant"],
+            ["Beachside Cafe", "Seafood Shack", "Sunset Bar"],
+            ["Mountain Lodge", "Forest Cafe", "Campfire Dinner"],
+            ["Village Kitchen", "Artisan Bakery", "Cultural Center"]
+        ]
+        
+        day_locations = [
+            ["Downtown Area", "Historic Quarter", "City Center"],
+            ["Old Town", "Cultural District", "Heritage Zone"],
+            ["Beachfront", "Coastal Area", "Marina District"],
+            ["Mountain Region", "Hill Station", "Nature Reserve"],
+            ["Rural Village", "Artisan Quarter", "Traditional Area"]
+        ]
+        
+        for day in range(1, duration + 1):
+            day_idx = (day - 1) % len(day_activities)  # Cycle through available options
+            
+            # Calculate the actual date for this day
+            current_date = start_date + timedelta(days=day-1)
+            
+            daily_itineraries.append({
+                "day_number": day,
+                "date": current_date.isoformat(),
+                "activities": [
+                    {
+                        "time": "09:00",
+                        "activity": f"{day_activities[day_idx][0]} - Day {day}",
+                        "location": f"{day_locations[day_idx][0]}, {destination}",
+                        "duration": "4 hours",
+                        "cost": budget_per_day * 0.3,
+                        "description": f"Discover the highlights of {destination} on day {day}",
+                        "category": "Sightseeing"
+                    },
+                    {
+                        "time": "14:00",
+                        "activity": f"{day_activities[day_idx][1]} - Day {day}",
+                        "location": f"{day_locations[day_idx][1]}, {destination}",
+                        "duration": "3 hours",
+                        "cost": budget_per_day * 0.2,
+                        "description": f"Immerse in local culture and traditions on day {day}",
+                        "category": "Cultural"
+                    }
+                ],
+                "meals": [
+                    {
+                        "meal_type": "Breakfast",
+                        "restaurant": f"{day_meals[day_idx][0]} in {destination}",
+                        "cost": budget_per_day * 0.1,
+                        "cuisine": "Local",
+                        "location": f"{day_locations[day_idx][0]}, {destination}",
+                        "time": "08:00"
+                    },
+                    {
+                        "meal_type": "Lunch",
+                        "restaurant": f"{day_meals[day_idx][1]} in {destination}",
+                        "cost": budget_per_day * 0.15,
+                        "cuisine": "Local specialties",
+                        "location": f"{day_locations[day_idx][1]}, {destination}",
+                        "time": "13:00"
+                    },
+                    {
+                        "meal_type": "Dinner",
+                        "restaurant": f"{day_meals[day_idx][2]} in {destination}",
+                        "cost": budget_per_day * 0.2,
+                        "cuisine": "Local & International",
+                        "location": f"{day_locations[day_idx][2]}, {destination}",
+                        "time": "19:00"
+                    }
+                ],
+                "accommodation": {
+                    "name": f"Day {day} Hotel in {destination}",
+                    "type": "Mid-range",
+                    "cost": budget_per_day * 0.4,
+                    "location": f"{day_locations[day_idx][0]}, {destination}",
+                    "amenities": ["WiFi", "AC", "Restaurant", "Room Service"]
+                },
+                "transport": {
+                    "mode": "Taxi/Private Car",
+                    "cost": budget_per_day * 0.1,
+                    "duration": "2 hours",
+                    "route": f"Day {day} city tour of {destination}"
+                },
+                "daily_budget": budget_per_day * (0.8 + (day * 0.1)),  # Vary budget by day (80% to 120%)
+                "tips": [f"Best time to visit attractions in {destination} on day {day}", "Local customs and etiquette"]
+            })
+        
         return [
             {
                 "option_name": "Cultural Heritage",
                 "theme": "cultural",
                 "description": "Explore the rich cultural heritage and historical sites",
-                "daily_itineraries": [],
+                "daily_itineraries": daily_itineraries,
                 "total_cost": trip_data.get('total_budget', 50000) * 0.8,
                 "highlights": ["Historical sites", "Local culture", "Traditional food"]
             },
@@ -312,7 +438,7 @@ class GoogleAIService:
                 "option_name": "Adventure Explorer",
                 "theme": "adventure",
                 "description": "Thrilling adventure activities and outdoor experiences",
-                "daily_itineraries": [],
+                "daily_itineraries": daily_itineraries,
                 "total_cost": trip_data.get('total_budget', 50000) * 0.9,
                 "highlights": ["Adventure sports", "Nature trails", "Outdoor activities"]
             },
@@ -320,7 +446,7 @@ class GoogleAIService:
                 "option_name": "Balanced Experience",
                 "theme": "balanced",
                 "description": "Perfect mix of culture, adventure, and relaxation",
-                "daily_itineraries": [],
+                "daily_itineraries": daily_itineraries,
                 "total_cost": trip_data.get('total_budget', 50000) * 0.85,
                 "highlights": ["Cultural sites", "Moderate adventure", "Local experiences"]
             }
