@@ -26,7 +26,8 @@ def init_database():
             
             # Test connection
             with engine.connect() as connection:
-                result = connection.execute("SELECT VERSION()")
+                from sqlalchemy import text
+                result = connection.execute(text("SELECT VERSION()"))
                 version = result.fetchone()[0]
                 print(f"✅ Connected to MySQL {version}")
         else:
@@ -60,9 +61,11 @@ def test_connection():
         print("🔍 Testing database connection...")
         with engine.connect() as connection:
             if "mysql" in settings.database_url:
-                result = connection.execute("SELECT 1")
+                from sqlalchemy import text
+                result = connection.execute(text("SELECT 1"))
             else:
-                result = connection.execute("SELECT 1")
+                from sqlalchemy import text
+                result = connection.execute(text("SELECT 1"))
             print("✅ Database connection successful")
         return True
     except Exception as e:

@@ -8,11 +8,15 @@ logger = logging.getLogger(__name__)
 
 class GoogleMapsService:
     def __init__(self):
-        if not settings.google_maps_api_key:
+        if not settings.google_maps_api_key or settings.google_maps_api_key == "your_google_maps_api_key_here":
             logger.warning("Google Maps API key not configured")
             self.client = None
         else:
-            self.client = googlemaps.Client(key=settings.google_maps_api_key)
+            try:
+                self.client = googlemaps.Client(key=settings.google_maps_api_key)
+            except Exception as e:
+                logger.error(f"Error initializing Google Maps client: {e}")
+                self.client = None
     
     async def get_place_details(self, place_id: str) -> Dict[str, Any]:
         """Get detailed information about a place"""

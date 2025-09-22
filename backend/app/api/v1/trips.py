@@ -54,14 +54,41 @@ async def create_trip(trip_data: TripCreate, db: Session = Depends(get_db)):
 
 @router.get("/{trip_id}", response_model=TripResponse)
 async def get_trip(trip_id: str, db: Session = Depends(get_db)):
-    """Get trip by ID"""
+    """Get trip by ID with selected option information"""
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Trip not found"
         )
-    return trip
+    
+    # Get the selected trip option if any
+    selected_option = db.query(TripOption).filter(
+        TripOption.trip_id == trip_id,
+        TripOption.is_selected == True
+    ).first()
+    
+    # Convert trip to dict and add selected option
+    trip_dict = {
+        "id": trip.id,
+        "destination": trip.destination,
+        "start_date": trip.start_date,
+        "end_date": trip.end_date,
+        "total_budget": trip.total_budget,
+        "currency": trip.currency,
+        "travelers": trip.travelers,
+        "themes": trip.themes,
+        "accommodation_preference": trip.accommodation_preference,
+        "transportation_preference": trip.transportation_preference,
+        "food_preference": trip.food_preference,
+        "special_requirements": trip.special_requirements,
+        "status": trip.status,
+        "created_at": trip.created_at,
+        "updated_at": trip.updated_at,
+        "selected_option": selected_option
+    }
+    
+    return trip_dict
 
 
 @router.put("/{trip_id}", response_model=TripResponse)

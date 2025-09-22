@@ -25,11 +25,12 @@ class Settings(BaseSettings):
     google_cloud_project_id: Optional[str] = None
     
     # CORS
-    allowed_origins: List[str] = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-    ]
+    allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001"
+    
+    @property
+    def allowed_origins_list(self) -> List[str]:
+        """Convert comma-separated origins to list"""
+        return [origin.strip() for origin in self.allowed_origins.split(",")]
     
     # Rate Limiting
     rate_limit_per_minute: int = 60

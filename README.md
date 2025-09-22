@@ -176,7 +176,6 @@ This project was built for the EaseMyTrip Hackathon. Feel free to explore the co
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-
 ## 🎯 Hackathon Compliance
 
 Tripora fully complies with the EaseMyTrip Hackathon requirements:

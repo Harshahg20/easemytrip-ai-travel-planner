@@ -27,16 +27,9 @@ export default function BudgetTracker({ trip, dailyItineraries }) {
 
   const currencySymbol = getCurrencySymbol(trip.currency || "INR");
 
-  // Calculate total costs
+  // Calculate total costs using daily_budget from API
   const totalEstimated = dailyItineraries.reduce((sum, day) => {
-    const dayTotal =
-      (day.activities || []).reduce(
-        (daySum, activity) => daySum + (activity.cost || 0),
-        0
-      ) +
-      (day.meals || []).reduce((daySum, meal) => daySum + (meal.cost || 0), 0) +
-      (day.accommodation?.cost || 0);
-    return sum + dayTotal;
+    return sum + (day.daily_budget || 0);
   }, 0);
 
   // Calculate category breakdowns

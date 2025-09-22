@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { createPageUrl } from "../utils";
-import { Trip } from "../entities/Trip";
+import { tripService } from "../services/api";
 import { Button } from "../components/ui/button";
 import { Card, CardHeader, CardContent } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
@@ -80,11 +80,11 @@ export default function MyTrips() {
   const fetchTrips = async () => {
     setLoading(true);
     try {
-      const userTrips = await Trip.list("-created_date");
+      const userTrips = await tripService.listTrips();
       setTrips(userTrips);
     } catch (err) {
+      console.error("Error fetching trips:", err);
       setError("Failed to load trips.");
-      console.error(err);
     } finally {
       setLoading(false);
     }
@@ -100,7 +100,16 @@ export default function MyTrips() {
   };
 
   const handleViewDetails = (trip) => {
-    navigate(createPageUrl(`TripPlanner?trip_id=${trip.id}`));
+    // Check if trip has a selected option
+    if (trip.selected_option) {
+      // Navigate to TripPlanner with both trip_id and option_id
+      navigate(
+        `/trip-planner?trip_id=${trip.id}&option_id=${trip.selected_option.id}`
+      );
+    } else {
+      // Navigate to TripOptions to select a plan first
+      navigate(`/trip-options?trip_id=${trip.id}`);
+    }
   };
 
   const handleDeleteRequest = (trip) => {
@@ -111,7 +120,7 @@ export default function MyTrips() {
   const handleDeleteConfirm = async () => {
     if (tripToDelete) {
       try {
-        await Trip.delete(tripToDelete.id);
+        await tripService.deleteTrip(tripToDelete.id);
         setTrips(trips.filter((t) => t.id !== tripToDelete.id));
       } catch (err) {
         setError("Failed to delete trip.");

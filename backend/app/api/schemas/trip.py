@@ -32,6 +32,23 @@ class TripUpdate(BaseModel):
     status: Optional[str] = None
 
 
+class TripOptionResponse(BaseModel):
+    id: str
+    trip_id: str
+    option_name: str
+    theme: str
+    description: Optional[str]
+    daily_itineraries: Optional[List[Dict[str, Any]]]
+    total_cost: Optional[float]
+    highlights: Optional[List[str]]
+    is_selected: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class TripResponse(BaseModel):
     id: str
     destination: str
@@ -48,6 +65,7 @@ class TripResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    selected_option: Optional[TripOptionResponse] = None
 
     class Config:
         from_attributes = True
@@ -98,23 +116,6 @@ class DailyItineraryResponse(BaseModel):
     meals: Optional[List[Dict[str, Any]]]
     accommodation: Optional[Dict[str, Any]]
     transport: Optional[Dict[str, Any]]
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class TripOptionResponse(BaseModel):
-    id: str
-    trip_id: str
-    option_name: str
-    theme: str
-    description: Optional[str]
-    daily_itineraries: Optional[List[Dict[str, Any]]]
-    total_cost: Optional[float]
-    highlights: Optional[List[str]]
-    is_selected: bool
     created_at: datetime
     updated_at: datetime
 

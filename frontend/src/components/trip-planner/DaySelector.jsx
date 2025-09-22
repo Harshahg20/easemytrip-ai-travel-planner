@@ -24,16 +24,8 @@ export default function DaySelector({
       <div className="overflow-x-auto">
         <div className="flex gap-3 pb-2">
           {dailyItineraries.map((day) => {
-            const dayBudget =
-              (day.activities || []).reduce(
-                (sum, activity) => sum + (activity.cost || 0),
-                0
-              ) +
-              (day.meals || []).reduce(
-                (sum, meal) => sum + (meal.cost || 0),
-                0
-              ) +
-              (day.accommodation?.cost || 0);
+            // Use the daily_budget from API instead of calculating
+            const dayBudget = day.daily_budget || 0;
 
             return (
               <Button
