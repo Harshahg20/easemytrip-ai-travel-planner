@@ -3,18 +3,36 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Badge } from "../ui/badge";
 import { MapPin, Calendar, DollarSign, Users, Heart } from "lucide-react";
 import { Progress } from "../ui/progress";
+import { TripSummarySkeleton } from "../ui/loading-skeletons";
 
-export default function TripSummary({ trip, dailyItineraries }) {
+export default function TripSummary({
+  trip,
+  dailyItineraries,
+  isLoading = false,
+}) {
+  if (isLoading) {
+    return <TripSummarySkeleton />;
+  }
+
   if (!trip) return null;
 
+  // Calculate trip duration from start and end dates
+  const startDate = new Date(trip.start_date);
+  const endDate = new Date(trip.end_date);
+  const tripDuration =
+    Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)) + 1;
+
   const totalEstimatedCost = dailyItineraries.reduce((sum, day) => {
+    if (!day) return sum; // Handle null days in lazy loading
+
     const dayTotal =
       (day.activities || []).reduce(
         (daySum, activity) => daySum + (activity.cost || 0),
         0
       ) +
       (day.meals || []).reduce((daySum, meal) => daySum + (meal.cost || 0), 0) +
-      (day.accommodation?.cost || 0);
+      (day.accommodation?.cost || 0) +
+      (day.transportation_cost || 0);
     return sum + dayTotal;
   }, 0);
 
@@ -24,7 +42,7 @@ export default function TripSummary({ trip, dailyItineraries }) {
   const summaryItems = [
     {
       label: "Days",
-      value: dailyItineraries.length,
+      value: tripDuration,
       icon: Calendar,
       color: "text-blue-600",
     },

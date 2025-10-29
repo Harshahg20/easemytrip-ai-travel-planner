@@ -11,6 +11,7 @@ import {
   Bus,
   BedDouble,
 } from "lucide-react";
+import { DayItinerarySkeleton } from "../ui/loading-skeletons";
 
 const getCategoryIcon = (category) => {
   switch (category?.toLowerCase()) {
@@ -29,7 +30,23 @@ const getCategoryIcon = (category) => {
   }
 };
 
-export default function DayItinerary({ dayData }) {
+export default function DayItinerary({ dayData, isLoading = false }) {
+  if (isLoading) {
+    return (
+      <Card className="border-slate-200 shadow-sm">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Clock className="w-5 h-5" />
+            <span>Loading Day Itinerary...</span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-6">
+          <DayItinerarySkeleton />
+        </CardContent>
+      </Card>
+    );
+  }
+
   if (!dayData) {
     return (
       <Card className="border-slate-200 shadow-sm">
@@ -179,7 +196,10 @@ export default function DayItinerary({ dayData }) {
                     <div className="flex items-center gap-1.5 text-emerald-600 font-medium">
                       <DollarSign className="w-4 h-4" />
                       <span>
-                        ₹{dayData.accommodation.cost?.toFixed(0) || 0}
+                        {dayData.accommodation.cost &&
+                        dayData.accommodation.cost > 0
+                          ? `₹${dayData.accommodation.cost.toFixed(0)}`
+                          : "Price on request"}
                       </span>
                     </div>
                   </div>

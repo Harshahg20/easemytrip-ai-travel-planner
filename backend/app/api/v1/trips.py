@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 import uuid
@@ -11,7 +11,7 @@ from ...services.google_maps_service import google_maps_service
 from ..schemas.trip import (
     TripCreate, TripResponse, TripUpdate,
     TripOptionResponse, DailyItineraryResponse,
-    TripOptionsGenerate
+    TripOptionsGenerate, PlaceSearchRequest, PlaceSearchResponse
 )
 
 router = APIRouter()
@@ -152,7 +152,7 @@ async def list_trips(
 @router.post("/{trip_id}/generate-options", response_model=List[TripOptionResponse])
 async def generate_trip_options(
     trip_id: str, 
-    options_request: TripOptionsGenerate,
+    options_request: TripOptionsGenerate = Body(default=TripOptionsGenerate()),
     db: Session = Depends(get_db)
 ):
     """Generate multiple trip options using AI"""
@@ -179,8 +179,14 @@ async def generate_trip_options(
             "duration": (trip.end_date - trip.start_date).days + 1
         }
         
-        # Generate options using AI
-        ai_options = await google_ai_service.generate_trip_options(trip_data)
+        # Generate options using AI with lazy loading (only first day)
+        ai_options = await google_ai_service.generate_trip_options_lazy(trip_data)
+        
+        if not ai_options or len(ai_options) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate trip options"
+            )
         
         # Save options to database
         saved_options = []
@@ -213,6 +219,66 @@ async def generate_trip_options(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error generating trip options: {str(e)}"
+        )
+
+
+@router.post("/{trip_id}/generate-day/{day_number}", response_model=Dict[str, Any])
+async def generate_single_day_itinerary(
+    trip_id: str,
+    day_number: int,
+    option_id: str = None,
+    db: Session = Depends(get_db)
+):
+    """Generate itinerary for a specific day (lazy loading)"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    if day_number < 1 or day_number > (trip.end_date - trip.start_date).days + 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid day number"
+        )
+    
+    try:
+        # Prepare trip data for AI
+        trip_data = {
+            "destination": trip.destination,
+            "start_date": trip.start_date.isoformat(),
+            "end_date": trip.end_date.isoformat(),
+            "total_budget": trip.total_budget,
+            "travelers": trip.travelers,
+            "themes": trip.themes or [],
+            "accommodation_preference": trip.accommodation_preference,
+            "transportation_preference": trip.transportation_preference,
+            "food_preference": trip.food_preference,
+            "special_requirements": trip.special_requirements,
+            "duration": (trip.end_date - trip.start_date).days + 1,
+            "day_number": day_number
+        }
+        
+        # Generate single day itinerary using AI
+        day_itinerary = await google_ai_service.generate_daily_itinerary(trip_data, day_number)
+        
+        if not day_itinerary:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate day itinerary"
+            )
+        
+        return {
+            "day_number": day_number,
+            "itinerary": day_itinerary,
+            "trip_id": trip_id
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating day itinerary: {str(e)}"
         )
 
 
@@ -339,11 +405,10 @@ async def get_travel_recommendations(
         )
 
 
-@router.post("/{trip_id}/places/search")
+@router.post("/{trip_id}/places/search", response_model=PlaceSearchResponse)
 async def search_places(
     trip_id: str,
-    query: str,
-    place_type: str = None,
+    request: PlaceSearchRequest,
     db: Session = Depends(get_db)
 ):
     """Search for places near the trip destination"""
@@ -366,9 +431,10 @@ async def search_places(
         
         # Search for places
         places = await google_maps_service.search_places(
-            query=query,
+            query=request.query,
             location=coordinates,
-            place_type=place_type
+            place_type=request.place_type,
+            radius=request.radius
         )
         
         return {"places": places, "destination": trip.destination}

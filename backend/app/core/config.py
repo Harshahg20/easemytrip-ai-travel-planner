@@ -22,7 +22,21 @@ class Settings(BaseSettings):
     # Google AI APIs - Must be provided in .env file
     google_ai_api_key: Optional[str] = None
     google_maps_api_key: Optional[str] = None
-    google_cloud_project_id: Optional[str] = None
+    google_cloud_project_id: str = "gen-ai-hackathon-476317"
+    
+    # Google Cloud ADK Settings
+    google_cloud_region: str = "us-central1"
+    google_application_credentials: str = "./gen-ai-hackathon-476317-71a0d1adef93.json"
+    
+    # ADK Agent Settings
+    adk_agent_timeout: int = 30
+    adk_max_conversation_history: int = 50
+    adk_enable_subagents: bool = True
+    
+    # External API Keys for sub-agents
+    openweather_api_key: str = ""
+    amadeus_api_key: str = ""
+    booking_api_key: str = ""
     
     # CORS
     allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001"
@@ -40,8 +54,14 @@ class Settings(BaseSettings):
     
     class Config:
         env_file = ".env"
-        case_sensitive = False
         env_file_encoding = "utf-8"
+        case_sensitive = False
+        # Remove quotes from environment variables
+        @classmethod
+        def parse_env_var(cls, field_name: str, raw_val: str) -> any:
+            if raw_val and raw_val.startswith('"') and raw_val.endswith('"'):
+                return raw_val[1:-1]
+            return raw_val
 
 
 # Create settings instance with error handling

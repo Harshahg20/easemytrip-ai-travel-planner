@@ -7,8 +7,16 @@ import {
   AlertTriangle,
   CheckCircle,
 } from "lucide-react";
+import { BudgetTrackerSkeleton } from "../ui/loading-skeletons";
 
-export default function BudgetTracker({ trip, dailyItineraries }) {
+export default function BudgetTracker({
+  trip,
+  dailyItineraries,
+  isLoading = false,
+}) {
+  if (isLoading) {
+    return <BudgetTrackerSkeleton />;
+  }
   // Get currency symbol based on trip currency
   const getCurrencySymbol = (currency) => {
     switch (currency) {
@@ -27,14 +35,26 @@ export default function BudgetTracker({ trip, dailyItineraries }) {
 
   const currencySymbol = getCurrencySymbol(trip.currency || "INR");
 
-  // Calculate total costs using daily_budget from API
+  // Calculate total costs from actual itinerary data
   const totalEstimated = dailyItineraries.reduce((sum, day) => {
-    return sum + (day.daily_budget || 0);
+    if (!day) return sum; // Handle null days in lazy loading
+
+    const dayTotal =
+      (day.activities || []).reduce(
+        (daySum, activity) => daySum + (activity.cost || 0),
+        0
+      ) +
+      (day.meals || []).reduce((daySum, meal) => daySum + (meal.cost || 0), 0) +
+      (day.accommodation?.cost || 0) +
+      (day.transportation_cost || 0);
+    return sum + dayTotal;
   }, 0);
 
   // Calculate category breakdowns
   const categoryBreakdown = dailyItineraries.reduce(
     (breakdown, day) => {
+      if (!day) return breakdown; // Handle null days in lazy loading
+
       breakdown.activities += (day.activities || []).reduce(
         (sum, activity) => sum + (activity.cost || 0),
         0
@@ -44,10 +64,16 @@ export default function BudgetTracker({ trip, dailyItineraries }) {
         0
       );
       breakdown.accommodation += day.accommodation?.cost || 0;
-      breakdown.transportation += (day.transportation || []).reduce(
-        (sum, transport) => sum + (transport.cost || 0),
-        0
-      );
+      // Handle transportation - it can be a string or array
+      if (Array.isArray(day.transportation)) {
+        breakdown.transportation += (day.transportation || []).reduce(
+          (sum, transport) => sum + (transport.cost || 0),
+          0
+        );
+      } else {
+        // If transportation is a string, try to extract cost from day data
+        breakdown.transportation += day.transportation_cost || 0;
+      }
       return breakdown;
     },
     { activities: 0, meals: 0, accommodation: 0, transportation: 0 }
@@ -217,7 +243,10 @@ export default function BudgetTracker({ trip, dailyItineraries }) {
           <div className="text-center">
             <div className="text-lg font-bold text-slate-900">
               {currencySymbol}
-              {(totalEstimated / dailyItineraries.length || 0).toFixed(0)}
+              {(
+                totalEstimated /
+                Math.max(dailyItineraries.filter((day) => day).length, 1)
+              ).toFixed(0)}
             </div>
             <div className="text-sm text-slate-600">Average per day</div>
           </div>

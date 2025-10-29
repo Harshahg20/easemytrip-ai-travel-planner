@@ -116,7 +116,9 @@ export default function CustomizationPanel({ option, trip, onSave, onCancel }) {
         (day.activities?.reduce((s, a) => s + (a.cost || 0), 0) || 0) +
         (day.meals?.reduce((s, m) => s + (m.cost || 0), 0) || 0) +
         (day.accommodation?.cost || 0) +
-        (day.transportation?.reduce((s, t) => s + (t.cost || 0), 0) || 0);
+        (Array.isArray(day.transportation)
+          ? day.transportation.reduce((s, t) => s + (t.cost || 0), 0)
+          : day.transportation_cost || 0);
       return sum + dayTotal;
     }, 0);
   };

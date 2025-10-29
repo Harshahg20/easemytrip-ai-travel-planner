@@ -3,7 +3,7 @@ import axios from "axios";
 // Create axios instance with base configuration
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL || "http://localhost:8000/api/v1",
-  timeout: 30000, // 30 seconds timeout
+  timeout: 120000, // 120 seconds (2 minutes) timeout for AI operations
   headers: {
     "Content-Type": "application/json",
   },
@@ -152,11 +152,31 @@ export const tripService = {
     try {
       const response = await api.post(
         `/trips/${tripId}/generate-options`,
-        optionsRequest
+        optionsRequest,
+        {
+          timeout: 180000, // 3 minutes timeout for AI generation
+        }
       );
       return response.data;
     } catch (error) {
       console.error("Error generating trip options:", error);
+      throw error;
+    }
+  },
+
+  // Generate single day itinerary (lazy loading)
+  generateDayItinerary: async (tripId, dayNumber, optionId = null) => {
+    try {
+      const response = await api.post(
+        `/trips/${tripId}/generate-day/${dayNumber}`,
+        { option_id: optionId },
+        {
+          timeout: 120000, // 2 minutes timeout for single day generation
+        }
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error generating day itinerary:", error);
       throw error;
     }
   },
