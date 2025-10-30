@@ -55,7 +55,27 @@ export default function DaySelector({
             const dayNumber = index + 1;
             const day = dailyItineraries[index];
             // Use the daily_budget from API instead of calculating
-            const dayBudget = day?.daily_budget || 0;
+            const computeFallbackBudget = (day) => {
+              if (!day) return 0;
+              const activitiesTotal = (day.activities || []).reduce(
+                (sum, a) => sum + (a?.cost || 0),
+                0
+              );
+              const mealsTotal = (day.meals || []).reduce(
+                (sum, m) => sum + (m?.cost || 0),
+                0
+              );
+              const accommodationTotal = day.accommodation?.cost || 0;
+              const transportTotal = Array.isArray(day.transportation)
+                ? (day.transportation || []).reduce(
+                    (sum, t) => sum + (t?.cost || 0),
+                    0
+                  )
+                : day.transportation_cost || 0;
+              return activitiesTotal + mealsTotal + accommodationTotal + transportTotal;
+            };
+            const dayBudgetRaw = typeof day?.daily_budget === "number" ? day.daily_budget : 0;
+            const dayBudget = dayBudgetRaw > 0 ? dayBudgetRaw : computeFallbackBudget(day);
             const isLoading = loadingDays.has(dayNumber);
             const isLoaded = loadedDays.has(dayNumber);
             const hasData = day && day.activities && day.activities.length > 0;
@@ -108,7 +128,7 @@ export default function DaySelector({
                     }`}
                   >
                     <DollarSign className="w-3 h-3 mr-1" />₹
-                    {dayBudget.toFixed(0)}
+                    {Number(dayBudget || 0).toFixed(0)}
                   </Badge>
                 )}
                 {!hasData && !isLoading && (

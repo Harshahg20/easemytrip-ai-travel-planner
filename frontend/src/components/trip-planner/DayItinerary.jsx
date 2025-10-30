@@ -95,7 +95,27 @@ export default function DayItinerary({ dayData, isLoading = false }) {
             className="bg-slate-100 text-slate-700 font-semibold"
           >
             <DollarSign className="w-3 h-3 mr-1" />₹
-            {dayData.daily_budget?.toFixed(0) || 0}
+            {(() => {
+              const budget = typeof dayData.daily_budget === "number" ? dayData.daily_budget : 0;
+              if (budget > 0) return budget.toFixed(0);
+              const activitiesTotal = (dayData.activities || []).reduce(
+                (sum, a) => sum + (a?.cost || 0),
+                0
+              );
+              const mealsTotal = (dayData.meals || []).reduce(
+                (sum, m) => sum + (m?.cost || 0),
+                0
+              );
+              const accommodationTotal = dayData.accommodation?.cost || 0;
+              const transportTotal = Array.isArray(dayData.transportation)
+                ? (dayData.transportation || []).reduce(
+                    (sum, t) => sum + (t?.cost || 0),
+                    0
+                  )
+                : dayData.transportation_cost || 0;
+              const total = activitiesTotal + mealsTotal + accommodationTotal + transportTotal;
+              return total.toFixed(0);
+            })()}
           </Badge>
         </CardTitle>
       </CardHeader>
