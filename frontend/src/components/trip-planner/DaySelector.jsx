@@ -72,13 +72,27 @@ export default function DaySelector({
                     0
                   )
                 : day.transportation_cost || 0;
-              return activitiesTotal + mealsTotal + accommodationTotal + transportTotal;
+              return (
+                activitiesTotal +
+                mealsTotal +
+                accommodationTotal +
+                transportTotal
+              );
             };
-            const dayBudgetRaw = typeof day?.daily_budget === "number" ? day.daily_budget : 0;
-            const dayBudget = dayBudgetRaw > 0 ? dayBudgetRaw : computeFallbackBudget(day);
+            const dayBudgetRaw =
+              typeof day?.daily_budget === "number" ? day.daily_budget : 0;
+            const dayBudget =
+              dayBudgetRaw > 0 ? dayBudgetRaw : computeFallbackBudget(day);
             const isLoading = loadingDays.has(dayNumber);
             const isLoaded = loadedDays.has(dayNumber);
-            const hasData = day && day.activities && day.activities.length > 0;
+            const hasData = !!(
+              day &&
+              ((day.places && day.places.length > 0) ||
+                (day.activities && day.activities.length > 0) ||
+                (day.meals && day.meals.length > 0) ||
+                (day.accommodation &&
+                  Object.keys(day.accommodation).length > 0))
+            );
 
             return (
               <Button

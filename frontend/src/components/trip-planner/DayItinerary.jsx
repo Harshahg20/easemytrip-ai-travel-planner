@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Badge } from "../ui/badge";
 import {
@@ -12,6 +12,8 @@ import {
   BedDouble,
 } from "lucide-react";
 import { DayItinerarySkeleton } from "../ui/loading-skeletons";
+import MapModal from "./MapModal";
+import { tripService } from "../../services/api";
 
 const getCategoryIcon = (category) => {
   switch (category?.toLowerCase()) {
@@ -35,6 +37,38 @@ export default function DayItinerary({
   isLoading = false,
   selectedDay = null,
 }) {
+  const [mapOpen, setMapOpen] = useState(false);
+  const [mapPoint, setMapPoint] = useState(null);
+
+  const openDirections = async (item) => {
+    try {
+      let center = null;
+      const coords = item.coordinates || item.location_coordinates;
+      if (
+        coords &&
+        typeof coords.lat === "number" &&
+        typeof coords.lng === "number"
+      ) {
+        center = { lat: coords.lat, lng: coords.lng };
+      } else if (item.location) {
+        const params = new URLSearchParams(window.location.search);
+        const tripId = params.get("trip_id");
+        if (tripId) {
+          const res = await tripService.geocodePlace(tripId, item.location);
+          if (res && typeof res.lat === "number") center = res;
+        }
+      }
+      if (center) {
+        setMapPoint({
+          center,
+          title: item.activity || item.place || item.restaurant || "Location",
+        });
+        setMapOpen(true);
+      }
+    } catch (e) {
+      console.error("Directions error", e);
+    }
+  };
   if (isLoading) {
     return (
       <Card className="border-slate-200 shadow-sm">
@@ -69,6 +103,17 @@ export default function DayItinerary({
   }
 
   const allItems = [
+    // Map place-based items to activity-like items for UI reuse
+    ...(dayData.places || []).map((p) => ({
+      time: undefined,
+      activity: p.place || p.name || "Place",
+      location: p.location,
+      duration: undefined,
+      cost: p.estimated_cost || p.cost || 0,
+      description: p.description,
+      category: "place",
+      type: "activity",
+    })),
     ...(dayData.activities || []).map((item) => ({
       ...item,
       type: "activity",
@@ -79,11 +124,7 @@ export default function DayItinerary({
       activity: item.restaurant,
       location: item.location,
     })),
-  ].sort((a, b) => {
-    const timeA = a.time || "00:00";
-    const timeB = b.time || "00:00";
-    return timeA.localeCompare(timeB);
-  });
+  ];
 
   return (
     <Card className="border-slate-200 shadow-sm bg-white">
@@ -104,7 +145,10 @@ export default function DayItinerary({
           >
             <DollarSign className="w-3 h-3 mr-1" />₹
             {(() => {
-              const budget = typeof dayData.daily_budget === "number" ? dayData.daily_budget : 0;
+              const budget =
+                typeof dayData.daily_budget === "number"
+                  ? dayData.daily_budget
+                  : 0;
               if (budget > 0) return budget.toFixed(0);
               const activitiesTotal = (dayData.activities || []).reduce(
                 (sum, a) => sum + (a?.cost || 0),
@@ -121,7 +165,11 @@ export default function DayItinerary({
                     0
                   )
                 : dayData.transportation_cost || 0;
-              const total = activitiesTotal + mealsTotal + accommodationTotal + transportTotal;
+              const total =
+                activitiesTotal +
+                mealsTotal +
+                accommodationTotal +
+                transportTotal;
               return total.toFixed(0);
             })()}
           </Badge>
@@ -139,17 +187,6 @@ export default function DayItinerary({
                 className="p-6 hover:bg-slate-50 transition-colors"
               >
                 <div className="flex items-start gap-4">
-                  <div className="text-center min-w-[60px] pt-1">
-                    <div className="text-base font-bold text-slate-700">
-                      {item.time || "--:--"}
-                    </div>
-                    {item.duration && (
-                      <div className="text-xs text-slate-500 mt-1">
-                        {item.duration}
-                      </div>
-                    )}
-                  </div>
-
                   <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center border border-slate-200 mt-1">
                     <IconComponent className="w-5 h-5 text-slate-600" />
                   </div>
@@ -169,6 +206,15 @@ export default function DayItinerary({
                       <div className="flex items-center gap-1.5 text-slate-500">
                         <MapPin className="w-4 h-4" />
                         <span>{item.location}</span>
+                        {item.location && (
+                          <button
+                            type="button"
+                            className="ml-2 text-blue-600 hover:underline"
+                            onClick={() => openDirections(item)}
+                          >
+                            Directions
+                          </button>
+                        )}
                       </div>
 
                       {item.cost > 0 && (
@@ -243,6 +289,14 @@ export default function DayItinerary({
           )}
         </div>
       </CardContent>
+      {mapOpen && mapPoint && (
+        <MapModal
+          open={mapOpen}
+          onOpenChange={setMapOpen}
+          center={mapPoint.center}
+          title={mapPoint.title}
+        />
+      )}
     </Card>
   );
 }

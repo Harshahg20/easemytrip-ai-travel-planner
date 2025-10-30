@@ -2,12 +2,16 @@ from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 import uuid
+import logging
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 from ...core.database import get_db
 from ...models.trip import Trip, DailyItinerary, TripOption
 from ...services.google_ai_service import google_ai_service
 from ...services.google_maps_service import google_maps_service
+from ...core.config import settings
 from ..schemas.trip import (
     TripCreate, TripResponse, TripUpdate,
     TripOptionResponse, DailyItineraryResponse,
@@ -282,6 +286,55 @@ async def generate_single_day_itinerary(
         )
 
 
+@router.post("/{trip_id}/generate-optimized", response_model=List[Dict[str, Any]])
+async def generate_optimized_trip_options(
+    trip_id: str, 
+    options_request: TripOptionsGenerate = Body(default=TripOptionsGenerate()),
+    db: Session = Depends(get_db)
+):
+    """Generate trip options using hybrid loading strategy for optimal performance"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    try:
+        # Prepare trip data for AI
+        trip_data = {
+            "destination": trip.destination,
+            "start_date": trip.start_date.isoformat(),
+            "end_date": trip.end_date.isoformat(),
+            "total_budget": trip.total_budget,
+            "travelers": trip.travelers,
+            "themes": trip.themes or [],
+            "accommodation_preference": trip.accommodation_preference,
+            "transportation_preference": trip.transportation_preference,
+            "food_preference": trip.food_preference,
+            "special_requirements": trip.special_requirements,
+            "duration": (trip.end_date - trip.start_date).days + 1
+        }
+        
+        # Generate options using hybrid loading strategy
+        ai_options = await google_ai_service.generate_optimized_trip_options(trip_data)
+        
+        if not ai_options or len(ai_options) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate optimized trip options"
+            )
+        
+        logger.info(f"Successfully generated {len(ai_options)} optimized trip options")
+        return ai_options
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating optimized trip options: {str(e)}"
+        )
+
+
 @router.get("/{trip_id}/options", response_model=List[TripOptionResponse])
 async def get_trip_options(trip_id: str, db: Session = Depends(get_db)):
     """Get all options for a trip"""
@@ -443,4 +496,86 @@ async def search_places(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error searching places: {str(e)}"
+        )
+
+
+@router.get("/{trip_id}/photos", response_model=Dict[str, Any])
+async def get_destination_photos(trip_id: str, db: Session = Depends(get_db)):
+    """Return a list of destination photo URLs using Google Places Photos API.
+    Requires Google Maps Platform API key with Places API enabled.
+    """
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+
+
+@router.get("/{trip_id}/geocode", response_model=Dict[str, Any])
+async def geocode_place(trip_id: str, q: str, db: Session = Depends(get_db)):
+    """Geocode a place for the trip's destination using Google Maps.
+    Returns { lat, lng } or 400 if not found.
+    """
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+
+    try:
+        # Prefer destination context to improve precision
+        query = q
+        if trip.destination and trip.destination.lower() not in q.lower():
+            query = f"{q}, {trip.destination}"
+        coords = await google_maps_service.geocode_address(query)
+        if not coords:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not geocode query"
+            )
+        return {"lat": coords[0], "lng": coords[1]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error geocoding: {str(e)}"
+        )
+
+    if not settings.google_maps_api_key or settings.google_maps_api_key == "your_google_maps_api_key_here":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google Maps API key not configured for photos"
+        )
+
+    try:
+        # Prefer attractions near destination coordinates
+        coords = await google_maps_service.geocode_address(trip.destination)
+        places = []
+        if coords:
+            places = await google_maps_service.get_nearby_attractions(coords, radius=15000)
+        if not places:
+            places = await google_maps_service.search_places(query=trip.destination)
+
+        photo_urls: List[str] = []
+        api_key = settings.google_maps_api_key
+
+        for p in places:
+            for ph in (p.get("photos") or [])[:3]:  # take up to 3 photos per place
+                ref = ph.get("photo_reference") or ph.get("photoReference")
+                if ref:
+                    url = (
+                        f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=1200&photo_reference={ref}&key={api_key}"
+                    )
+                    photo_urls.append(url)
+            if len(photo_urls) >= 12:
+                break
+
+        return {"destination": trip.destination, "photos": photo_urls[:12]}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching destination photos: {str(e)}"
         )

@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 class GoogleAIService:
     def __init__(self):
+        self.hybrid_service = None
         # Always load API key directly from .env file first (most reliable)
         api_key = None
         try:
@@ -62,10 +63,28 @@ class GoogleAIService:
             # Use Gemini 2.0 Flash for fastest responses
             self.model = genai.GenerativeModel('gemini-2.0-flash')
             logger.info(f"✅ Google AI service initialized with Gemini 2.0 Flash: {api_key[:10]}...{api_key[-5:]}")
+            
+            # Initialize hybrid loading service
+            self._initialize_hybrid_service()
         except Exception as e:
             logger.error(f"Error initializing Google AI service: {e}")
             self.model = None
     
+    def _initialize_hybrid_service(self):
+        """Initialize the hybrid loading service"""
+        try:
+            from .hybrid_loading_service import HybridLoadingService
+            from .google_maps_service import GoogleMapsService
+            
+            # Initialize Google Maps service
+            maps_service = GoogleMapsService()
+            
+            # Initialize hybrid service
+            self.hybrid_service = HybridLoadingService(self, maps_service)
+            logger.info("✅ Hybrid loading service initialized")
+        except Exception as e:
+            logger.warning(f"Could not initialize hybrid service: {e}")
+            self.hybrid_service = None
     
     async def generate_trip_options(self, trip_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
@@ -91,6 +110,25 @@ class GoogleAIService:
         except Exception as e:
             logger.error(f"Error generating trip options: {e}")
             return self._get_fallback_trip_options(trip_data)
+
+    async def generate_optimized_trip_options(self, trip_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Generate trip options using hybrid loading strategy for optimal performance
+        """
+        if not self.model:
+            logger.warning("Google AI model not available, using fallback options")
+            return self._get_fallback_trip_options(trip_data)
+        
+        # Use hybrid service if available
+        if self.hybrid_service:
+            try:
+                logger.info("Using hybrid loading service for optimized generation")
+                return await self.hybrid_service.generate_optimized_itinerary(trip_data)
+            except Exception as e:
+                logger.error(f"Hybrid service failed, falling back to standard: {e}")
+        
+        # Fallback to standard generation
+        return await self.generate_trip_options(trip_data)
 
     async def generate_trip_options_lazy(self, trip_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Generate trip options with only first day itinerary (lazy loading)"""
@@ -490,10 +528,9 @@ class GoogleAIService:
         
         return f"""
         You are an expert travel planner specializing in {destination}. 
-        Create 3 detailed, destination-specific trip options for a {duration}-day trip.
+        Create 3 destination-specific trip options for a {duration}-day trip.
         
-        IMPORTANT: All activities, restaurants, locations, and attractions MUST be specific to {destination}.
-        Do NOT use generic placeholders. Use real, famous places and attractions in {destination}.
+        IMPORTANT: Use only real places in {destination}. No generic placeholders. Keep the plan place-based (no hour-by-hour schedule).
         
         Trip Details:
         - Destination: {destination}
@@ -508,16 +545,14 @@ class GoogleAIService:
         Create 3 distinct options:
         1. Adventure-focused option (theme: "adventure")
         2. Cultural/Heritage-focused option (theme: "cultural")  
-        3. Balanced option (theme: "balanced") - mix of adventure and culture
+        3. Balanced option (theme: "balanced")
         
-        For each option, provide ONLY the FIRST DAY itinerary in detail.
-        The daily_itineraries array should contain ONLY ONE day (day 1).
-        Each daily itinerary should include:
-        - Specific activities at real locations in {destination} (name actual places)
-        - Restaurants with actual names or types common in {destination}
-        - Accommodation suggestions appropriate for {destination}
-        - Transportation details
-        - Costs that add up to approximately {budget_per_day:.0f} INR per day
+        For each option, provide ONLY the FIRST DAY as a place-based plan (no times). The JSON must include:
+        - "places": array of objects with: place, location, description, estimated_cost
+        - "meals": array with: meal_type, restaurant, cuisine, cost, location
+        - "accommodation": with: name, type, location, cost
+        - "transportation": string, and "transportation_cost": number
+        - "costs": total estimated cost for the day
         
         Return ONLY valid JSON array (no markdown, no code blocks, no explanations):
         [
@@ -529,14 +564,12 @@ class GoogleAIService:
                     {{
                         "day_number": 1,
                         "date": "{trip_data.get('start_date', '2024-01-01')}",
-                        "activities": [
+                        "places": [
                             {{
-                                "time": "09:00",
-                                "activity": "Specific activity name",
+                                "place": "Specific attraction name",
                                 "location": "Real location in {destination}",
-                                "duration": "2 hours",
-                                "cost": 1000,
-                                "description": "Detailed description"
+                                "description": "What to do/see here",
+                                "estimated_cost": 1000
                             }}
                         ],
                         "meals": [
@@ -647,16 +680,15 @@ class GoogleAIService:
         """
     
     def _create_daily_itinerary_prompt(self, trip_data: Dict[str, Any], day_number: int) -> str:
-        """Create prompt for generating daily itinerary"""
+        """Create prompt for generating daily itinerary (place-based, no hourly schedule)"""
         destination = trip_data.get('destination', 'India')
         budget_per_day = trip_data.get('total_budget', 10000) / trip_data.get('duration', 3)
         themes = ', '.join(trip_data.get('themes', ['cultural']))
         
         return f"""
-        Create a detailed, destination-specific daily itinerary for Day {day_number} of a trip to {destination}.
+        Create a place-based daily plan (no hour-by-hour schedule) for Day {day_number} in {destination}.
         
-        IMPORTANT: All activities, restaurants, and locations MUST be specific to {destination}.
-        Use real, famous places and attractions in {destination}. Do NOT use generic placeholders.
+        IMPORTANT: Use only real places in {destination}. No generic placeholders. Focus on places to visit and a simple plan.
         
         Trip Details:
         - Destination: {destination}
@@ -666,28 +698,23 @@ class GoogleAIService:
         - Day Number: {day_number}
         - Date: {trip_data.get('start_date', '2024-01-01')}
         
-        Provide a detailed schedule with:
-        - 2-3 specific activities at real locations in {destination} (name actual places)
-        - 3 meals (breakfast, lunch, dinner) at restaurants/types common in {destination}
-        - Accommodation appropriate for {destination}
-        - Transportation details
-        - Realistic costs that add up to approximately {budget_per_day:.0f} INR
-        - Local tips specific to {destination}
+        Provide:
+        - 3-5 places to cover (array of objects with: place, location, description, estimated_cost)
+        - 2-3 meals (breakfast/lunch/dinner) with: meal_type, restaurant, cuisine, cost, location
+        - Accommodation suggestion with: name, type, location, cost
+        - Transportation summary string and transportation_cost number
+        - daily_budget number and tips array
         
         Return ONLY valid JSON (no markdown, no code blocks, no explanations):
         {{
             "day_number": {day_number},
             "date": "2024-01-01",
-            "activities": [
+            "places": [
                 {{
-                    "time": "09:00",
-                    "activity": "Activity name",
-                    "location": "Location",
-                    "duration": "2 hours",
-                    "cost": 1000,
-                    "description": "Detailed description",
-                    "category": "Category",
-                    "coordinates": {{"lat": 28.6139, "lng": 77.209}}
+                    "place": "Attraction name",
+                    "location": "Area / Address",
+                    "description": "What to do/see here",
+                    "estimated_cost": 800
                 }}
             ],
             "meals": [
@@ -696,24 +723,19 @@ class GoogleAIService:
                     "restaurant": "Restaurant name",
                     "cost": 500,
                     "cuisine": "Local",
-                    "location": "Location",
-                    "time": "08:00"
+                    "location": "Area"
                 }}
             ],
             "accommodation": {{
                 "name": "Hotel name",
                 "type": "Budget/Mid-range/Luxury",
                 "cost": 3000,
-                "location": "Location",
-                "amenities": ["WiFi", "AC", "Restaurant"]
+                "location": "Area"
             }},
-            "transport": {{
-                "mode": "Car/Taxi/Public",
-                "cost": 1000,
-                "duration": "1 hour",
-                "route": "Route description"
-            }},
-            "daily_budget": 5000,
+            "transportation": "Taxi/Car/Metro ...",
+            "transportation_cost": 600,
+            "daily_budget": {budget_per_day:.0f},
+            "costs": {budget_per_day:.0f},
             "tips": ["Local tip 1", "Local tip 2"]
         }}
         """
@@ -848,7 +870,29 @@ class GoogleAIService:
                 
                 # Validate that we got a dict
                 if isinstance(parsed_data, dict) and len(parsed_data) > 0:
-                    logger.info(f"Successfully parsed daily itinerary from Gemini")
+                    # Normalize to place-based format (no hour-wise schedule)
+                    places = parsed_data.get('places') or []
+                    # If model returned activities with time, convert them to places
+                    if not places and parsed_data.get('activities'):
+                        converted = []
+                        for a in parsed_data.get('activities', []):
+                            if not isinstance(a, dict):
+                                continue
+                            converted.append({
+                                "place": a.get("activity") or a.get("place") or "Place",
+                                "location": a.get("location"),
+                                "description": a.get("description"),
+                                "estimated_cost": a.get("cost") or 0,
+                            })
+                        places = converted
+                    parsed_data['places'] = places
+                    # Remove verbose fields if present
+                    parsed_data.pop('activities', None)
+                    # Remove meal time if present to keep things crisp
+                    for m in parsed_data.get('meals', []) or []:
+                        if isinstance(m, dict) and 'time' in m:
+                            m.pop('time', None)
+                    logger.info(f"Successfully parsed daily itinerary from Gemini (place-based)")
                     return parsed_data
                 else:
                     logger.warning(f"Parsed data is empty or not a dict: {type(parsed_data)}")
@@ -1025,15 +1069,12 @@ class GoogleAIService:
         return {
             "day_number": day_number,
             "date": trip_data.get('start_date', '2024-01-01'),
-            "activities": [
+            "places": [
                 {
-                    "time": "09:00",
-                    "activity": "City exploration",
-                    "location": "City center",
-                    "duration": "3 hours",
-                    "cost": 1000,
-                    "description": "Explore the main attractions",
-                    "category": "Sightseeing"
+                    "place": "City exploration",
+                    "location": f"City center, {trip_data.get('destination','')}",
+                    "description": "Explore key attractions and local markets",
+                    "estimated_cost": 1000
                 }
             ],
             "meals": [
@@ -1041,16 +1082,20 @@ class GoogleAIService:
                     "meal_type": "Breakfast",
                     "restaurant": "Local restaurant",
                     "cost": 500,
-                    "cuisine": "Local"
+                    "cuisine": "Local",
+                    "location": f"City center, {trip_data.get('destination','')}"
                 }
             ],
             "accommodation": {
                 "name": "Local hotel",
                 "type": "Mid-range",
                 "cost": 3000,
-                "location": "City center"
+                "location": f"City center, {trip_data.get('destination','')}"
             },
-            "daily_budget": 5000
+            "transportation": "Local transport",
+            "transportation_cost": 500,
+            "daily_budget": 5000,
+            "costs": 5000
         }
     
     def _get_fallback_recommendations(self, destination: str, interests: List[str]) -> Dict[str, Any]:
@@ -1095,6 +1140,16 @@ class GoogleAIService:
                         coords = await google_maps_service.geocode_address(f"{activity['location']}, {destination}")
                         if coords:
                             activity['coordinates'] = {
+                                'lat': coords[0],
+                                'lng': coords[1]
+                            }
+            # Add coordinates to places (new place-based format)
+            if itinerary.get('places'):
+                for place in itinerary['places']:
+                    if isinstance(place, dict) and place.get('location') and not place.get('coordinates'):
+                        coords = await google_maps_service.geocode_address(f"{place['location']}, {destination}")
+                        if coords:
+                            place['coordinates'] = {
                                 'lat': coords[0],
                                 'lng': coords[1]
                             }

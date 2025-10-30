@@ -103,6 +103,29 @@ export const tripService = {
     }
   },
 
+  // Get destination photos using Google Places Photos API
+  getDestinationPhotos: async (tripId) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/photos`);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching destination photos:", error);
+      throw error;
+    }
+  },
+
+  // Geocode a place (scoped to trip destination)
+  geocodePlace: async (tripId, query) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/geocode`, {
+        params: { q: query },
+      });
+      return response.data; // { lat, lng }
+    } catch (error) {
+      console.error("Error geocoding place:", error);
+      throw error;
+    }
+  },
   // Get trip by ID
   getTrip: async (tripId) => {
     try {
@@ -160,6 +183,23 @@ export const tripService = {
       return response.data;
     } catch (error) {
       console.error("Error generating trip options:", error);
+      throw error;
+    }
+  },
+
+  // Generate optimized trip options using hybrid loading strategy
+  generateOptimizedTripOptions: async (tripId, optionsRequest = {}) => {
+    try {
+      const response = await api.post(
+        `/trips/${tripId}/generate-optimized`,
+        optionsRequest,
+        {
+          timeout: 300000, // 5 minutes timeout for optimized generation
+        }
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error generating optimized trip options:", error);
       throw error;
     }
   },
