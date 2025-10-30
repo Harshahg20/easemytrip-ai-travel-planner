@@ -30,14 +30,18 @@ const getCategoryIcon = (category) => {
   }
 };
 
-export default function DayItinerary({ dayData, isLoading = false }) {
+export default function DayItinerary({
+  dayData,
+  isLoading = false,
+  selectedDay = null,
+}) {
   if (isLoading) {
     return (
       <Card className="border-slate-200 shadow-sm">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Clock className="w-5 h-5" />
-            <span>Loading Day Itinerary...</span>
+            <span>Loading Day {selectedDay || ""} Itinerary...</span>
           </CardTitle>
         </CardHeader>
         <CardContent className="p-6">
@@ -53,7 +57,11 @@ export default function DayItinerary({ dayData, isLoading = false }) {
         <CardContent className="p-8 text-center">
           <div className="text-slate-500">
             <Clock className="w-12 h-12 mx-auto mb-4 opacity-50" />
-            <p>Select a day to view the itinerary</p>
+            <p>
+              {selectedDay
+                ? `Day ${selectedDay} is loading...`
+                : "Select a day to view the itinerary"}
+            </p>
           </div>
         </CardContent>
       </Card>
