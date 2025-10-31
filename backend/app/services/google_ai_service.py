@@ -478,9 +478,16 @@ class GoogleAIService:
     async def generate_daily_itinerary(self, trip_data: Dict[str, Any], day_number: int) -> Dict[str, Any]:
         """
         Generate detailed daily itinerary for a specific day with coordinates
+        Supports weather-adjusted itineraries if weather_data is provided
         """
         try:
-            prompt = self._create_daily_itinerary_prompt(trip_data, day_number)
+            # Check if weather data is provided for weather-adjusted itinerary
+            weather_data = trip_data.get("weather_data")
+            if weather_data:
+                prompt = self._create_weather_adjusted_itinerary_prompt(trip_data, day_number, weather_data)
+            else:
+                prompt = self._create_daily_itinerary_prompt(trip_data, day_number)
+            
             response = await self._generate_content(prompt)
             itinerary = self._parse_daily_itinerary_response(response)
             
@@ -737,6 +744,105 @@ class GoogleAIService:
             "daily_budget": {budget_per_day:.0f},
             "costs": {budget_per_day:.0f},
             "tips": ["Local tip 1", "Local tip 2"]
+        }}
+        """
+    
+    def _create_weather_adjusted_itinerary_prompt(
+        self, 
+        trip_data: Dict[str, Any], 
+        day_number: int,
+        weather_data: Dict[str, Any]
+    ) -> str:
+        """Create prompt for generating weather-adjusted daily itinerary"""
+        destination = trip_data.get('destination', 'India')
+        budget_per_day = trip_data.get('total_budget', 10000) / trip_data.get('duration', 3)
+        themes = ', '.join(trip_data.get('themes', ['cultural']))
+        current_itinerary = trip_data.get('current_itinerary', {})
+        
+        weather_condition = weather_data.get("condition", "").lower()
+        weather_desc = weather_data.get("description", "")
+        temperature = weather_data.get("temperature", 0)
+        rain = weather_data.get("rain", 0)
+        
+        # Build weather context
+        weather_context = f"""
+WEATHER CONDITIONS FOR THIS DAY:
+- Condition: {weather_desc.title()}
+- Temperature: {temperature:.1f}°C
+- Rain: {rain}mm
+- Weather Type: {weather_condition}
+
+IMPORTANT ADJUSTMENTS NEEDED:
+"""
+        
+        if weather_condition in ["rain", "thunderstorm", "drizzle"] or rain > 0:
+            weather_context += "- Move outdoor activities indoors or reschedule\n"
+            weather_context += "- Suggest indoor alternatives (museums, galleries, covered markets, indoor entertainment)\n"
+            weather_context += "- Adjust meal locations to indoor restaurants\n"
+        elif temperature < 5:
+            weather_context += "- Suggest warm indoor activities\n"
+            weather_context += "- Minimize time spent outdoors\n"
+        elif temperature > 35:
+            weather_context += "- Schedule outdoor activities early morning or late evening\n"
+            weather_context += "- Suggest air-conditioned indoor venues for midday\n"
+        
+        return f"""
+        Create a weather-adjusted place-based daily plan (no hour-by-hour schedule) for Day {day_number} in {destination}.
+        
+        {weather_context}
+        
+        IMPORTANT: Adjust the current itinerary based on weather conditions. Replace outdoor activities with suitable indoor alternatives when weather is adverse.
+        
+        CURRENT ITINERARY:
+        {json.dumps(current_itinerary, indent=2)}
+        
+        Trip Details:
+        - Destination: {destination}
+        - Budget per day: {budget_per_day:.0f} INR
+        - Travelers: {trip_data.get('travelers', 2)}
+        - Interests: {themes}
+        - Day Number: {day_number}
+        - Date: {trip_data.get('start_date', '2024-01-01')}
+        
+        Provide adjusted itinerary with:
+        - 3-5 places (indoor alternatives if weather is bad) with: place, location, description, estimated_cost
+        - 2-3 meals (indoor restaurants) with: meal_type, restaurant, cuisine, cost, location
+        - Accommodation suggestion with: name, type, location, cost
+        - Transportation summary and transportation_cost
+        - daily_budget and tips array
+        
+        Return ONLY valid JSON (no markdown, no code blocks, no explanations):
+        {{
+            "day_number": {day_number},
+            "date": "{trip_data.get('start_date', '2024-01-01')}",
+            "places": [
+                {{
+                    "place": "Indoor attraction name",
+                    "location": "Area / Address",
+                    "description": "What to do/see here (weather-appropriate)",
+                    "estimated_cost": 800
+                }}
+            ],
+            "meals": [
+                {{
+                    "meal_type": "Breakfast",
+                    "restaurant": "Restaurant name",
+                    "cost": 500,
+                    "cuisine": "Local",
+                    "location": "Area"
+                }}
+            ],
+            "accommodation": {{
+                "name": "Hotel name",
+                "type": "Budget/Mid-range/Luxury",
+                "cost": 3000,
+                "location": "Area"
+            }},
+            "transportation": "Taxi/Car/Metro ...",
+            "transportation_cost": 600,
+            "daily_budget": {budget_per_day:.0f},
+            "costs": {budget_per_day:.0f},
+            "tips": ["Weather-adjusted tip 1", "Weather-adjusted tip 2"]
         }}
         """
     

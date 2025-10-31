@@ -11,6 +11,7 @@ from ...core.database import get_db
 from ...models.trip import Trip, DailyItinerary, TripOption
 from ...services.google_ai_service import google_ai_service
 from ...services.google_maps_service import google_maps_service
+from ...services.smart_adjustments_service import smart_adjustments_service
 from ...core.config import settings
 from ..schemas.trip import (
     TripCreate, TripResponse, TripUpdate,
@@ -511,39 +512,6 @@ async def get_destination_photos(trip_id: str, db: Session = Depends(get_db)):
             detail="Trip not found"
         )
 
-
-@router.get("/{trip_id}/geocode", response_model=Dict[str, Any])
-async def geocode_place(trip_id: str, q: str, db: Session = Depends(get_db)):
-    """Geocode a place for the trip's destination using Google Maps.
-    Returns { lat, lng } or 400 if not found.
-    """
-    trip = db.query(Trip).filter(Trip.id == trip_id).first()
-    if not trip:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trip not found"
-        )
-
-    try:
-        # Prefer destination context to improve precision
-        query = q
-        if trip.destination and trip.destination.lower() not in q.lower():
-            query = f"{q}, {trip.destination}"
-        coords = await google_maps_service.geocode_address(query)
-        if not coords:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Could not geocode query"
-            )
-        return {"lat": coords[0], "lng": coords[1]}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error geocoding: {str(e)}"
-        )
-
     if not settings.google_maps_api_key or settings.google_maps_api_key == "your_google_maps_api_key_here":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -578,4 +546,214 @@ async def geocode_place(trip_id: str, q: str, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching destination photos: {str(e)}"
+        )
+
+
+@router.get("/{trip_id}/geocode", response_model=Dict[str, Any])
+async def geocode_place(trip_id: str, q: str, db: Session = Depends(get_db)):
+    """Geocode a place for the trip's destination using Google Maps.
+    Returns { lat, lng } or 400 if not found.
+    """
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+
+    try:
+        # Prefer destination context to improve precision
+        query = q
+        if trip.destination and trip.destination.lower() not in q.lower():
+            query = f"{q}, {trip.destination}"
+        coords = await google_maps_service.geocode_address(query)
+        if not coords:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not geocode query"
+            )
+        return {"lat": coords[0], "lng": coords[1]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error geocoding: {str(e)}"
+        )
+
+
+@router.get("/{trip_id}/smart-adjustments/{day_number}", response_model=Dict[str, Any])
+async def get_smart_adjustments(
+    trip_id: str,
+    day_number: int,
+    db: Session = Depends(get_db)
+):
+    """Get smart adjustment suggestions for a specific day based on weather, traffic, and attractions"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    # Validate day number
+    total_days = (trip.end_date - trip.start_date).days + 1
+    if day_number < 1 or day_number > total_days:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid day number. Must be between 1 and {total_days}"
+        )
+    
+    try:
+        # Calculate the date for this day
+        target_date = trip.start_date + timedelta(days=day_number - 1)
+        
+        # Get the itinerary for this day if it exists
+        daily_itinerary = db.query(DailyItinerary).filter(
+            DailyItinerary.trip_id == trip_id,
+            DailyItinerary.day_number == day_number
+        ).first()
+        
+        current_itinerary = None
+        if daily_itinerary:
+            current_itinerary = {
+                "places": daily_itinerary.activities or [],
+                "activities": daily_itinerary.activities or [],
+                "meals": daily_itinerary.meals or [],
+                "transport": daily_itinerary.transport or {}
+            }
+        
+        # Get coordinates for destination
+        coordinates = await google_maps_service.geocode_address(trip.destination)
+        
+        # Fetch smart adjustments using the service
+        adjustments = await smart_adjustments_service.get_smart_adjustments(
+            trip_id=trip_id,
+            destination=trip.destination,
+            date=target_date,
+            coordinates=coordinates,
+            current_itinerary=current_itinerary
+        )
+        
+        return {
+            "trip_id": trip_id,
+            "day_number": day_number,
+            "date": target_date.isoformat(),
+            "adjustments": adjustments,
+            "count": len(adjustments)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching smart adjustments: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching smart adjustments: {str(e)}"
+        )
+
+
+@router.post("/{trip_id}/adjust-itinerary/{day_number}", response_model=Dict[str, Any])
+async def adjust_itinerary(
+    trip_id: str,
+    day_number: int,
+    adjustment_type: str = Body(..., description="Type of adjustment: weather, traffic, or opportunity"),
+    adjustment_data: Dict[str, Any] = Body(..., description="Adjustment data and preferences"),
+    db: Session = Depends(get_db)
+):
+    """Apply smart adjustments to modify the itinerary for a specific day based on weather/traffic conditions"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    # Validate day number
+    total_days = (trip.end_date - trip.start_date).days + 1
+    if day_number < 1 or day_number > total_days:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid day number. Must be between 1 and {total_days}"
+        )
+    
+    try:
+        # Get the current itinerary for this day
+        daily_itinerary = db.query(DailyItinerary).filter(
+            DailyItinerary.trip_id == trip_id,
+            DailyItinerary.day_number == day_number
+        ).first()
+        
+        if not daily_itinerary:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Daily itinerary not found for this day"
+            )
+        
+        # Get target date
+        target_date = trip.start_date + timedelta(days=day_number - 1)
+        
+        # Get coordinates
+        coordinates = await google_maps_service.geocode_address(trip.destination)
+        if not coordinates:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not find coordinates for destination"
+            )
+        
+        # Apply adjustments using AI service
+        # For weather adjustments, regenerate itinerary considering weather
+        if adjustment_type == "weather":
+            # Use AI to generate weather-adjusted itinerary
+            trip_data = {
+                "destination": trip.destination,
+                "date": target_date.isoformat(),
+                "current_itinerary": {
+                    "activities": daily_itinerary.activities or [],
+                    "meals": daily_itinerary.meals or [],
+                    "places": daily_itinerary.activities or []
+                },
+                "weather_data": adjustment_data.get("weather_data", {})
+            }
+            
+            # Generate adjusted daily itinerary
+            adjusted_itinerary = await google_ai_service.generate_daily_itinerary(
+                trip_data, day_number
+            )
+            
+            # Update with adjusted data
+            if adjusted_itinerary:
+                daily_itinerary.activities = adjusted_itinerary.get("activities") or adjusted_itinerary.get("places", [])
+                daily_itinerary.meals = adjusted_itinerary.get("meals", daily_itinerary.meals)
+                daily_itinerary.transport = adjusted_itinerary.get("transport", daily_itinerary.transport) or adjusted_itinerary.get("transportation")
+        
+        elif adjustment_type == "traffic":
+            # For traffic, mainly update transport timing
+            transport = daily_itinerary.transport or {}
+            if isinstance(transport, dict):
+                transport["adjusted_timing"] = adjustment_data.get("suggested_departure_time")
+                transport["alternative_route"] = adjustment_data.get("alternative_route")
+                daily_itinerary.transport = transport
+        
+        daily_itinerary.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(daily_itinerary)
+        
+        return {
+            "message": "Itinerary adjusted successfully",
+            "trip_id": trip_id,
+            "day_number": day_number,
+            "adjusted_itinerary": {
+                "activities": daily_itinerary.activities,
+                "meals": daily_itinerary.meals,
+                "transport": daily_itinerary.transport
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error adjusting itinerary: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error adjusting itinerary: {str(e)}"
         )

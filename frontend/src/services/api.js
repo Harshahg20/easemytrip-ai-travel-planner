@@ -280,6 +280,37 @@ export const tripService = {
       throw error;
     }
   },
+
+  // Get smart adjustments for a specific day
+  getSmartAdjustments: async (tripId, dayNumber) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/smart-adjustments/${dayNumber}`);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching smart adjustments:", error);
+      throw error;
+    }
+  },
+
+  // Adjust itinerary based on weather/traffic conditions
+  adjustItinerary: async (tripId, dayNumber, adjustmentType, adjustmentData) => {
+    try {
+      const response = await api.post(
+        `/trips/${tripId}/adjust-itinerary/${dayNumber}`,
+        {
+          adjustment_type: adjustmentType,
+          adjustment_data: adjustmentData,
+        },
+        {
+          timeout: 180000, // 3 minutes timeout for AI adjustment
+        }
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error adjusting itinerary:", error);
+      throw error;
+    }
+  },
 };
 
 export default api;
