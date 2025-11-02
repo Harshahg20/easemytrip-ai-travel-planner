@@ -479,11 +479,12 @@ export default function TripForm() {
       const createdTrip = await tripService.createTrip(tripData);
       console.log("Trip created successfully:", createdTrip);
 
-      // Generate trip options using AI
+      // Generate trip options using AI with language support
       console.log("Generating trip options...");
+      const currentLang = localStorage.getItem("tripora_language") || "english";
       const tripOptions = await tripService.generateTripOptions(
         createdTrip.id,
-        {}
+        { language: currentLang }
       );
       console.log("Trip options generated:", tripOptions);
 

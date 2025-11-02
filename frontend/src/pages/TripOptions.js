@@ -22,7 +22,7 @@ import CustomizationPanel from "../components/trip-options/CustomizationPanel";
 
 export default function TripOptions() {
   const navigate = useNavigate();
-  const { t } = useLanguage();
+  const { t, currentLanguage } = useLanguage();
   const [trip, setTrip] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -73,8 +73,11 @@ export default function TripOptions() {
   const handleRegenerateOptions = async () => {
     setRegenerating(true);
     try {
-      // Regenerate trip options using API
-      const newOptions = await tripService.generateTripOptions(trip.id, {});
+      // Regenerate trip options using API with language support
+      const currentLang = currentLanguage || localStorage.getItem("tripora_language") || "english";
+      const newOptions = await tripService.generateTripOptions(trip.id, {
+        language: currentLang
+      });
 
       // Update local state with new options
       setTrip({

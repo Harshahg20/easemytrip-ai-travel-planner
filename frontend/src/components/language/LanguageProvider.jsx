@@ -271,6 +271,13 @@ export const translations = {
     tripOverview: "Trip Overview",
     yourInterests: "Your Interests",
     budgetUtilization: "Budget Utilization",
+    transportationBudget: "Transportation Budget",
+    withinBudget: "Within Budget",
+    nearBudgetLimit: "Near Budget Limit",
+    calculatedCost: "Calculated Cost",
+    trainTickets: "Train Tickets",
+    carRental: "Car Rental",
+    localTransport: "Local Transport",
 
     // Languages
     languages: {
@@ -1535,6 +1542,13 @@ export const translations = {
     tripOverview: "ట్రిప్ అవలోకనం",
     yourInterests: "మీ ఆసక్తులు",
     budgetUtilization: "బడ్జెట్ వినియోగం",
+    transportationBudget: "రవాణా బడ్జెట్",
+    withinBudget: "బడ్జెట్ లోపల",
+    nearBudgetLimit: "బడ్జెట్ పరిమితి దగ్గర",
+    calculatedCost: "లెక్కించిన వ్యయం",
+    trainTickets: "రైలు టిక్కెట్లు",
+    carRental: "కారు అద్దె",
+    localTransport: "స్థానిక రవాణా",
     languages: {
       english: "English",
       hindi: "हिंदी",

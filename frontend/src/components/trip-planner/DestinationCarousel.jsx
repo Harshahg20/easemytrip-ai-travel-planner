@@ -1,27 +1,14 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useRef } from "react";
 import { ChevronLeft, ChevronRight, Image as ImageIcon } from "lucide-react";
-import { tripService } from "../../services/api";
 
-export default function DestinationCarousel({ tripId, destination }) {
-  const [photos, setPhotos] = useState([]);
-  const [loading, setLoading] = useState(true);
+export default function DestinationCarousel({ 
+  tripId, 
+  destination, 
+  photos = [], 
+  loading = false,
+  error = null 
+}) {
   const containerRef = useRef(null);
-
-  useEffect(() => {
-    let mounted = true;
-    async function load() {
-      try {
-        const data = await tripService.getDestinationPhotos(tripId);
-        if (mounted) setPhotos(data.photos || []);
-      } catch (e) {
-        console.error("Failed to load destination photos", e);
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    }
-    if (tripId) load();
-    return () => (mounted = false);
-  }, [tripId]);
 
   const scrollBy = (dx) => {
     if (containerRef.current) {
@@ -31,16 +18,17 @@ export default function DestinationCarousel({ tripId, destination }) {
 
   if (loading) {
     return (
-      <div className="w-full h-64 md:h-80 lg:h-96 rounded-xl overflow-hidden border border-slate-200 mb-6 flex items-center justify-center text-slate-400">
-        <ImageIcon className="w-6 h-6 mr-2" /> Loading photos...
+      <div className="w-full h-64 md:h-80 lg:h-96 rounded-xl overflow-hidden border border-slate-200 mb-6 flex items-center justify-center text-slate-400 bg-slate-50">
+        <ImageIcon className="w-6 h-6 mr-2 animate-pulse" /> Loading photos...
       </div>
     );
   }
 
-  if (!photos.length) {
+  if (error || !photos.length) {
     return (
-      <div className="w-full h-64 md:h-80 lg:h-96 rounded-xl overflow-hidden border border-slate-200 mb-6 flex items-center justify-center text-slate-400">
-        <ImageIcon className="w-6 h-6 mr-2" /> No photos found for {destination}
+      <div className="w-full h-64 md:h-80 lg:h-96 rounded-xl overflow-hidden border border-slate-200 mb-6 flex items-center justify-center text-slate-400 bg-slate-50">
+        <ImageIcon className="w-6 h-6 mr-2" /> 
+        {error || `No photos found for ${destination}`}
       </div>
     );
   }

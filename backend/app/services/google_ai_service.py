@@ -475,24 +475,104 @@ class GoogleAIService:
             
             return self._get_fallback_trip_options(trip_data)
     
-    async def generate_daily_itinerary(self, trip_data: Dict[str, Any], day_number: int) -> Dict[str, Any]:
+    async def generate_trip_structure(self, trip_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Generate trip structure with main places assigned to each day.
+        This creates a high-level plan that ensures diversity across days.
+        """
+        try:
+            destination = trip_data.get('destination', 'India')
+            duration = trip_data.get('duration', 3)
+            themes = ', '.join(trip_data.get('themes', ['cultural']))
+            
+            prompt = f"""
+            You are an expert travel planner. Create a {duration}-day trip structure for {destination}.
+            
+            CRITICAL REQUIREMENTS:
+            1. Assign a MAIN AREA/PLACE for each day that is DIFFERENT from other days
+            2. Ensure geographic and thematic diversity across days
+            3. Early days (1-2): Focus on iconic, must-see areas
+            4. Middle days: Explore different neighborhoods/regions
+            5. Later days: Off-the-beaten-path or deeper cultural experiences
+            
+            Return ONLY valid JSON array (no markdown, no code blocks):
+            [
+                {{
+                    "day_number": 1,
+                    "main_place": "Area name (e.g., Old City, Downtown, Mountain View)",
+                    "main_attractions": ["Attraction 1", "Attraction 2", "Attraction 3"],
+                    "theme_focus": "cultural/adventure/relaxation",
+                    "description": "Brief description of what this day will explore"
+                }},
+                // ... {duration} days total
+            ]
+            """
+            
+            response = await self._generate_content(prompt)
+            
+            # Parse JSON response
+            import json
+            import re
+            json_match = re.search(r'\[[\s\S]*\]', response)
+            if json_match:
+                structure = json.loads(json_match.group())
+                logger.info(f"Generated trip structure with {len(structure)} days")
+                return structure
+            else:
+                logger.warning("Could not parse trip structure, using fallback")
+                return self._get_fallback_trip_structure(trip_data)
+                
+        except Exception as e:
+            logger.error(f"Error generating trip structure: {e}")
+            return self._get_fallback_trip_structure(trip_data)
+    
+    def _get_fallback_trip_structure(self, trip_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate a simple fallback trip structure"""
+        duration = trip_data.get('duration', 3)
+        destination = trip_data.get('destination', 'India')
+        
+        structure = []
+        areas = ["City Center", "Historic District", "Scenic Area", "Cultural Quarter", "Local Neighborhood"]
+        
+        for day in range(1, duration + 1):
+            area_index = (day - 1) % len(areas)
+            structure.append({
+                "day_number": day,
+                "main_place": f"{areas[area_index]}",
+                "main_attractions": [f"{destination} Attraction {day}-1", f"{destination} Attraction {day}-2"],
+                "theme_focus": "cultural",
+                "description": f"Explore {areas[area_index]} on day {day}"
+            })
+        
+        return structure
+
+    async def generate_daily_itinerary(self, trip_data: Dict[str, Any], day_number: int, trip_structure: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Generate detailed daily itinerary for a specific day with coordinates
         Supports weather-adjusted itineraries if weather_data is provided
+        If trip_structure is provided, focuses on that day's main place and attractions
         """
         try:
+            # Find the day's structure if provided
+            day_structure = None
+            if trip_structure:
+                day_structure = next((d for d in trip_structure if d.get('day_number') == day_number), None)
+                logger.info(f"Using trip structure for day {day_number}: {day_structure.get('main_place') if day_structure else 'None'}")
+            
             # Check if weather data is provided for weather-adjusted itinerary
             weather_data = trip_data.get("weather_data")
             if weather_data:
-                prompt = self._create_weather_adjusted_itinerary_prompt(trip_data, day_number, weather_data)
+                prompt = self._create_weather_adjusted_itinerary_prompt(trip_data, day_number, weather_data, day_structure)
             else:
-                prompt = self._create_daily_itinerary_prompt(trip_data, day_number)
+                prompt = self._create_daily_itinerary_prompt(trip_data, day_number, day_structure)
             
             response = await self._generate_content(prompt)
             itinerary = self._parse_daily_itinerary_response(response)
             
             # Enhance with coordinates using Google Maps
-            itinerary = await self._enhance_itinerary_with_coordinates(itinerary, trip_data.get('destination', ''))
+            # If we have a main place, use it for better location context
+            search_location = day_structure.get('main_place') if day_structure else trip_data.get('destination', '')
+            itinerary = await self._enhance_itinerary_with_coordinates(itinerary, search_location)
             
             return itinerary
         except Exception as e:
@@ -686,36 +766,76 @@ class GoogleAIService:
         ]
         """
     
-    def _create_daily_itinerary_prompt(self, trip_data: Dict[str, Any], day_number: int) -> str:
+    def _create_daily_itinerary_prompt(self, trip_data: Dict[str, Any], day_number: int, day_structure: Optional[Dict[str, Any]] = None) -> str:
         """Create prompt for generating daily itinerary (place-based, no hourly schedule)"""
         destination = trip_data.get('destination', 'India')
-        budget_per_day = trip_data.get('total_budget', 10000) / trip_data.get('duration', 3)
+        duration = trip_data.get('duration', 3)
+        budget_per_day = trip_data.get('total_budget', 10000) / duration
         themes = ', '.join(trip_data.get('themes', ['cultural']))
         
-        return f"""
-        Create a place-based daily plan (no hour-by-hour schedule) for Day {day_number} in {destination}.
+        # Calculate the actual date for this day
+        try:
+            start_date = trip_data.get('start_date')
+            if isinstance(start_date, str):
+                from datetime import datetime, timedelta
+                start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                day_date = start + timedelta(days=day_number - 1)
+                date_str = day_date.strftime('%Y-%m-%d')
+            else:
+                date_str = trip_data.get('start_date', '2024-01-01')
+        except:
+            date_str = trip_data.get('start_date', '2024-01-01')
         
-        IMPORTANT: Use only real places in {destination}. No generic placeholders. Focus on places to visit and a simple plan.
+        # Build structure context if available
+        structure_context = ""
+        if day_structure:
+            main_place = day_structure.get('main_place', '')
+            main_attractions = day_structure.get('main_attractions', [])
+            theme_focus = day_structure.get('theme_focus', '')
+            structure_context = f"""
+        
+        DAY-SPECIFIC FOCUS (from trip structure):
+        - Main Area/Place: {main_place}
+        - Main Attractions to cover: {', '.join(main_attractions) if main_attractions else 'Various attractions in this area'}
+        - Theme Focus: {theme_focus}
+        - Description: {day_structure.get('description', '')}
+        
+        IMPORTANT: Focus your itinerary around {main_place} and its nearby attractions. 
+        Search for real places, restaurants, and activities specifically in or near {main_place}.
+        Ensure all places you suggest are actually in or around {main_place} area.
+        """
+        
+        return f"""
+        Create a detailed place-based daily plan (no hour-by-hour schedule) for Day {day_number} of a {duration}-day trip to {destination}.
+        {structure_context}
+        
+        CRITICAL REQUIREMENTS:
+        1. Use ONLY real, specific places in {destination}. No generic placeholders.
+        2. This is Day {day_number} of {duration} days - select DIFFERENT places than would be visited on other days.
+        3. {"Focus your entire day around the main area: " + day_structure.get('main_place', '') + ". Find attractions, restaurants, and activities specifically in this area." if day_structure else "Plan a diverse itinerary that explores different areas/attractions of " + destination + "."}
+        4. For multi-day trips, ensure variety: different neighborhoods, different types of attractions, different restaurants.
+        5. If day {day_number} is early in the trip, focus on iconic must-see places. If later, explore off-the-beaten-path locations or deeper cultural experiences.
         
         Trip Details:
         - Destination: {destination}
+        - Total Trip Duration: {duration} days
+        - Current Day: {day_number} of {duration}
         - Budget per day: {budget_per_day:.0f} INR
         - Travelers: {trip_data.get('travelers', 2)}
         - Interests: {themes}
-        - Day Number: {day_number}
-        - Date: {trip_data.get('start_date', '2024-01-01')}
+        - Date: {date_str}
         
-        Provide:
-        - 3-5 places to cover (array of objects with: place, location, description, estimated_cost)
-        - 2-3 meals (breakfast/lunch/dinner) with: meal_type, restaurant, cuisine, cost, location
-        - Accommodation suggestion with: name, type, location, cost
+        Provide for THIS SPECIFIC DAY ({day_number}):
+        - 3-5 UNIQUE places to cover (array of objects with: place, location, description, estimated_cost){" - prioritize places in or near " + day_structure.get('main_place', '') if day_structure else ""}
+        - 2-3 meals (breakfast/lunch/dinner) with: meal_type, restaurant, cuisine, cost, location - choose restaurants {"in " + day_structure.get('main_place', '') if day_structure else "different from other days"}
+        - Accommodation suggestion with: name, type, location, cost {"preferably in or near " + day_structure.get('main_place', '') if day_structure else ""}
         - Transportation summary string and transportation_cost number
         - daily_budget number and tips array
         
         Return ONLY valid JSON (no markdown, no code blocks, no explanations):
         {{
             "day_number": {day_number},
-            "date": "2024-01-01",
+            "date": "{date_str}",
             "places": [
                 {{
                     "place": "Attraction name",
@@ -751,7 +871,8 @@ class GoogleAIService:
         self, 
         trip_data: Dict[str, Any], 
         day_number: int,
-        weather_data: Dict[str, Any]
+        weather_data: Dict[str, Any],
+        day_structure: Optional[Dict[str, Any]] = None
     ) -> str:
         """Create prompt for generating weather-adjusted daily itinerary"""
         destination = trip_data.get('destination', 'India')
@@ -763,6 +884,19 @@ class GoogleAIService:
         weather_desc = weather_data.get("description", "")
         temperature = weather_data.get("temperature", 0)
         rain = weather_data.get("rain", 0)
+        
+        # Build structure context if available
+        structure_context = ""
+        if day_structure:
+            main_place = day_structure.get('main_place', '')
+            structure_context = f"""
+        
+        ORIGINAL PLAN FOR THIS DAY:
+        - Main Area/Place: {main_place}
+        - Main Attractions: {', '.join(day_structure.get('main_attractions', []))}
+        
+        When adjusting for weather, try to stay within the {main_place} area but suggest indoor alternatives or weather-appropriate activities.
+        """
         
         # Build weather context
         weather_context = f"""
@@ -788,7 +922,7 @@ IMPORTANT ADJUSTMENTS NEEDED:
         
         return f"""
         Create a weather-adjusted place-based daily plan (no hour-by-hour schedule) for Day {day_number} in {destination}.
-        
+        {structure_context}
         {weather_context}
         
         IMPORTANT: Adjust the current itinerary based on weather conditions. Replace outdoor activities with suitable indoor alternatives when weather is adverse.
@@ -1286,6 +1420,471 @@ IMPORTANT ADJUSTMENTS NEEDED:
         except Exception as e:
             logger.error(f"Error enhancing itinerary with coordinates: {e}")
             return itinerary
+    
+    async def generate_transport_details(self, trip_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate local transport details based on budget, duration, and preferences.
+        This includes city/local transport options like buses, taxis, car rentals, etc.
+        Filters options to ensure they fit within budget constraints.
+        """
+        if not self.model:
+            logger.warning("Google AI model not available, using fallback transport details")
+            return self._get_fallback_transport_details(trip_data)
+        
+        try:
+            prompt = self._create_transport_details_prompt(trip_data)
+            response = await self._generate_content(prompt)
+            
+            # Parse JSON response
+            transport_data = self._parse_json_response(response)
+            
+            if not transport_data or not isinstance(transport_data, dict):
+                return self._get_fallback_transport_details(trip_data)
+            
+            # Filter options based on budget
+            transport_data = self._filter_transport_options_by_budget(transport_data, trip_data)
+            
+            return transport_data
+            
+        except Exception as e:
+            logger.error(f"Error generating transport details: {e}")
+            return self._get_fallback_transport_details(trip_data)
+    
+    def _filter_transport_options_by_budget(self, transport_data: Dict[str, Any], trip_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter transport options to ensure they fit within budget constraints"""
+        total_budget = trip_data.get('total_budget', 50000)
+        transport_budget = total_budget * 0.18  # 18% of total budget for local transport
+        
+        if 'recommendations' in transport_data:
+            recommendations = transport_data.get('recommendations', [])
+            filtered_recommendations = []
+            
+            for rec in recommendations:
+                cost = rec.get('total_cost') or (rec.get('daily_cost', 0) * trip_data.get('duration', 3))
+                # Only include if within budget (allow some flexibility with 120% buffer)
+                if cost <= transport_budget * 1.2:
+                    filtered_recommendations.append(rec)
+            
+            # If no options fit, take the cheapest option
+            if not filtered_recommendations and recommendations:
+                filtered_recommendations = [min(recommendations, key=lambda x: x.get('total_cost') or (x.get('daily_cost', 0) * trip_data.get('duration', 3)))]
+            
+            transport_data['recommendations'] = filtered_recommendations
+        
+        # Recalculate total estimated cost
+        total_cost = sum(
+            rec.get('total_cost') or (rec.get('daily_cost', 0) * trip_data.get('duration', 3))
+            for rec in transport_data.get('recommendations', [])
+        )
+        transport_data['total_estimated_cost'] = total_cost
+        transport_data['budget_remaining'] = transport_budget - total_cost
+        
+        return transport_data
+    
+    async def generate_travel_details(self, trip_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate inter-city travel details based on budget and duration.
+        This includes flights, trains, buses for traveling to/from the destination.
+        Filters options to ensure they fit within budget constraints.
+        """
+        if not self.model:
+            logger.warning("Google AI model not available, using fallback travel details")
+            return self._get_fallback_travel_details(trip_data)
+        
+        try:
+            prompt = self._create_travel_details_prompt(trip_data)
+            response = await self._generate_content(prompt)
+            
+            # Parse JSON response
+            travel_data = self._parse_json_response(response)
+            
+            if not travel_data or not isinstance(travel_data, dict):
+                return self._get_fallback_travel_details(trip_data)
+            
+            # Filter options based on budget
+            travel_data = self._filter_travel_options_by_budget(travel_data, trip_data)
+            
+            return travel_data
+            
+        except Exception as e:
+            logger.error(f"Error generating travel details: {e}")
+            return self._get_fallback_travel_details(trip_data)
+    
+    def _filter_travel_options_by_budget(self, travel_data: Dict[str, Any], trip_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter travel options to ensure they fit within budget constraints"""
+        total_budget = trip_data.get('total_budget', 50000)
+        travelers = trip_data.get('travelers', 2)
+        travel_budget = total_budget * 0.45  # 45% of total budget for travel
+        
+        # Filter outbound options
+        if 'outbound_options' in travel_data:
+            outbound_options = travel_data.get('outbound_options', [])
+            filtered_outbound = []
+            for option in outbound_options:
+                cost = option.get('total_cost') or (option.get('cost_per_person', 0) * travelers)
+                # Only include if within budget (allow some flexibility with 120% buffer for estimation)
+                if cost <= travel_budget * 1.2:
+                    filtered_outbound.append(option)
+            
+            # If no options fit, take the cheapest option
+            if not filtered_outbound and outbound_options:
+                filtered_outbound = [min(outbound_options, key=lambda x: x.get('total_cost') or (x.get('cost_per_person', 0) * travelers))]
+            
+            travel_data['outbound_options'] = filtered_outbound
+        
+        # Filter return options
+        if 'return_options' in travel_data:
+            return_options = travel_data.get('return_options', [])
+            filtered_return = []
+            for option in return_options:
+                cost = option.get('total_cost') or (option.get('cost_per_person', 0) * travelers)
+                # Only include if within budget
+                if cost <= travel_budget * 1.2:
+                    filtered_return.append(option)
+            
+            # If no options fit, take the cheapest option
+            if not filtered_return and return_options:
+                filtered_return = [min(return_options, key=lambda x: x.get('total_cost') or (x.get('cost_per_person', 0) * travelers))]
+            
+            travel_data['return_options'] = filtered_return
+        
+        # Recalculate total estimated cost
+        total_cost = 0
+        for option in travel_data.get('outbound_options', []):
+            total_cost += option.get('total_cost') or (option.get('cost_per_person', 0) * travelers)
+        for option in travel_data.get('return_options', []):
+            total_cost += option.get('total_cost') or (option.get('cost_per_person', 0) * travelers)
+        
+        travel_data['total_estimated_cost'] = total_cost
+        travel_data['budget_remaining'] = travel_budget - total_cost
+        
+        return travel_data
+    
+    def _create_transport_details_prompt(self, trip_data: Dict[str, Any]) -> str:
+        """Create prompt for generating local transport details"""
+        destination = trip_data.get('destination', 'India')
+        duration = trip_data.get('duration', trip_data.get('total_days', 3))
+        total_budget = trip_data.get('total_budget', 50000)
+        travelers = trip_data.get('travelers', 2)
+        preference = trip_data.get('transportation_preference', 'mixed')
+        
+        # Allocate 15-20% of budget for local transport
+        transport_budget = total_budget * 0.18
+        transport_budget_per_day = transport_budget / duration
+        
+        return f"""
+        You are an expert travel planner. Generate LOCAL/CITY transport recommendations for a {duration}-day trip to {destination}.
+        
+        Trip Details:
+        - Destination: {destination}
+        - Duration: {duration} days
+        - Total Budget: ₹{total_budget:,} INR
+        - Transport Budget: ₹{transport_budget:,.0f} INR ({transport_budget_per_day:,.0f} per day)
+        - Travelers: {travelers}
+        - Transport Preference: {preference}
+        
+        Generate LOCAL transport options for getting around WITHIN {destination} during the trip.
+        Options should include:
+        1. Car rental (private transport)
+        2. Taxi/Cab services (Ola, Uber, local taxis)
+        3. Public transport (buses, metro, local trains)
+        4. Bike/Scooter rental (if applicable)
+        5. Auto-rickshaws or similar local transport
+        
+        Each option should include:
+        - Type of transport
+        - Provider/Service name
+        - Daily/weekly/total cost
+        - Coverage area
+        - Availability hours
+        - Booking information
+        - Suitability based on preference
+        
+        Return ONLY valid JSON (no markdown, no code blocks):
+        {{
+            "destination": "{destination}",
+            "duration_days": {duration},
+            "total_budget": {transport_budget:.0f},
+            "transport_preference": "{preference}",
+            "recommendations": [
+                {{
+                    "type": "car_rental",
+                    "title": "Private Car Rental",
+                    "provider": "Zoomcar / Ola Outstation",
+                    "description": "Self-drive or chauffeur-driven car",
+                    "daily_cost": 1500,
+                    "total_cost": {int(transport_budget_per_day * 0.4)},
+                    "duration": "{duration} days",
+                    "coverage": "Entire city and nearby attractions",
+                    "availability": "24/7",
+                    "booking_info": "Book online or via app",
+                    "suitable_for": "Families, groups, flexibility",
+                    "features": ["AC", "GPS", "Flexible routes"]
+                }},
+                {{
+                    "type": "taxi",
+                    "title": "Taxi/Cab Services",
+                    "provider": "Ola / Uber / Local Taxis",
+                    "description": "On-demand cab services",
+                    "daily_cost": 800,
+                    "total_cost": {int(transport_budget_per_day * 0.25)},
+                    "duration": "{duration} days",
+                    "coverage": "Point-to-point travel",
+                    "availability": "24/7",
+                    "booking_info": "Book via app or phone",
+                    "suitable_for": "Short trips, convenience",
+                    "features": ["AC", "Real-time tracking"]
+                }},
+                {{
+                    "type": "public_transport",
+                    "title": "Public Transport Pass",
+                    "provider": "City Transport Corporation",
+                    "description": "Bus/Metro passes",
+                    "daily_cost": 100,
+                    "total_cost": {int(transport_budget_per_day * 0.1)},
+                    "duration": "{duration} days",
+                    "coverage": "All major routes and attractions",
+                    "availability": "6 AM - 11 PM",
+                    "booking_info": "Available at stations or online",
+                    "suitable_for": "Budget travelers, local experience",
+                    "features": ["Economical", "Eco-friendly"]
+                }}
+            ],
+            "total_estimated_cost": {transport_budget:.0f},
+            "recommended_option": "{preference}",
+            "tips": [
+                "Book car rentals in advance for better rates",
+                "Public transport is most economical for budget trips",
+                "Mix of taxi and public transport works well for most travelers"
+            ]
+        }}
+        """
+    
+    def _create_travel_details_prompt(self, trip_data: Dict[str, Any]) -> str:
+        """Create prompt for generating inter-city travel details (flights, trains, buses)"""
+        destination = trip_data.get('destination', 'India')
+        duration = trip_data.get('duration', trip_data.get('total_days', 3))
+        total_budget = trip_data.get('total_budget', 50000)
+        travelers = trip_data.get('travelers', 2)
+        start_date = trip_data.get('start_date', '2024-01-01')
+        end_date = trip_data.get('end_date', '2024-01-05')
+        preference = trip_data.get('transportation_preference', 'mixed')
+        
+        # Allocate 40-50% of budget for inter-city travel
+        travel_budget = total_budget * 0.45
+        travel_budget_per_person = travel_budget / travelers
+        
+        return f"""
+        You are an expert travel planner. Generate INTER-CITY travel recommendations for a trip to {destination}.
+        This includes travel TO and FROM the destination (flights, trains, buses).
+        
+        Trip Details:
+        - Destination: {destination}
+        - Duration: {duration} days
+        - Total Budget: ₹{total_budget:,} INR
+        - Travel Budget: ₹{travel_budget:,.0f} INR (₹{travel_budget_per_person:,.0f} per person)
+        - Travelers: {travelers}
+        - Start Date: {start_date}
+        - End Date: {end_date}
+        - Transport Preference: {preference}
+        
+        Generate travel options for:
+        1. Outbound journey (Delhi/Mumbai → {destination})
+        2. Return journey ({destination} → Delhi/Mumbai)
+        
+        Options should include:
+        - Flights (domestic airlines)
+        - Trains (Indian Railways - Express, Rajdhani, etc.)
+        - Buses (Volvo, AC buses for longer distances)
+        
+        Each option should include:
+        - Type (flight/train/bus)
+        - Route
+        - Provider/Airline/Railway
+        - Duration
+        - Departure/Arrival times
+        - Cost per person
+        - Total cost for all travelers
+        - Class/Category
+        - Booking information
+        
+        Return ONLY valid JSON (no markdown, no code blocks):
+        {{
+            "destination": "{destination}",
+            "duration_days": {duration},
+            "total_budget": {travel_budget:.0f},
+            "travel_budget_per_person": {travel_budget_per_person:.0f},
+            "travelers": {travelers},
+            "outbound_options": [
+                {{
+                    "type": "flight",
+                    "title": "Flight to {destination}",
+                    "provider": "IndiGo / Air India / Vistara",
+                    "route": "Delhi → {destination}",
+                    "duration": "2h 30m",
+                    "departure_time": "08:30 AM",
+                    "arrival_time": "11:00 AM",
+                    "cost_per_person": {int(travel_budget_per_person * 0.55)},
+                    "total_cost": {int(travel_budget_per_person * 0.55 * travelers)},
+                    "class": "Economy",
+                    "booking_info": "Book 2-3 months in advance for best rates",
+                    "features": ["Fastest option", "Comfortable", "Direct flights available"]
+                }},
+                {{
+                    "type": "train",
+                    "title": "Express Train to {destination}",
+                    "provider": "Indian Railways",
+                    "route": "New Delhi → {destination}",
+                    "duration": "8h 45m",
+                    "departure_time": "10:30 PM",
+                    "arrival_time": "07:15 AM (+1 day)",
+                    "cost_per_person": {int(travel_budget_per_person * 0.35)},
+                    "total_cost": {int(travel_budget_per_person * 0.35 * travelers)},
+                    "class": "2A / 3A",
+                    "booking_info": "Book via IRCTC 4 months in advance",
+                    "features": ["Cost-effective", "Sleeper berths", "Scenic route"]
+                }}
+            ],
+            "return_options": [
+                {{
+                    "type": "flight",
+                    "title": "Return Flight",
+                    "provider": "SpiceJet / Vistara",
+                    "route": "{destination} → Delhi",
+                    "duration": "2h 45m",
+                    "departure_time": "06:15 PM",
+                    "arrival_time": "09:00 PM",
+                    "cost_per_person": {int(travel_budget_per_person * 0.45)},
+                    "total_cost": {int(travel_budget_per_person * 0.45 * travelers)},
+                    "class": "Economy",
+                    "booking_info": "Round-trip bookings often cheaper",
+                    "features": ["Return journey", "Evening departure"]
+                }},
+                {{
+                    "type": "train",
+                    "title": "Return Train",
+                    "provider": "Indian Railways",
+                    "route": "{destination} → New Delhi",
+                    "duration": "9h 15m",
+                    "departure_time": "09:00 PM",
+                    "arrival_time": "06:15 AM (+1 day)",
+                    "cost_per_person": {int(travel_budget_per_person * 0.25)},
+                    "total_cost": {int(travel_budget_per_person * 0.25 * travelers)},
+                    "class": "2A / 3A",
+                    "booking_info": "Book return tickets together for convenience",
+                    "features": ["Night journey", "Saves accommodation cost"]
+                }}
+            ],
+            "total_estimated_cost": {travel_budget:.0f},
+            "recommended_combination": "Mix based on preference",
+            "tips": [
+                "Book flights 2-3 months in advance for best rates",
+                "Train tickets available 4 months in advance via IRCTC",
+                "Round-trip bookings often offer discounts",
+                "Consider travel time vs cost when choosing option"
+            ]
+        }}
+        """
+    
+    def _get_fallback_transport_details(self, trip_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback transport details when AI fails"""
+        destination = trip_data.get('destination', 'India')
+        duration = trip_data.get('duration', trip_data.get('total_days', 3))
+        total_budget = trip_data.get('total_budget', 50000)
+        travelers = trip_data.get('travelers', 2)
+        transport_budget = total_budget * 0.18
+        
+        return {
+            "destination": destination,
+            "duration_days": duration,
+            "total_budget": transport_budget,
+            "transport_preference": trip_data.get('transportation_preference', 'mixed'),
+            "recommendations": [
+                {
+                    "type": "car_rental",
+                    "title": "Private Car Rental",
+                    "provider": "Zoomcar / Ola Outstation",
+                    "description": "Self-drive or chauffeur-driven car",
+                    "daily_cost": 1500,
+                    "total_cost": int(transport_budget * 0.4),
+                    "duration": f"{duration} days",
+                    "coverage": "Entire city and nearby attractions",
+                    "availability": "24/7",
+                    "booking_info": "Book online or via app",
+                    "suitable_for": "Families, groups, flexibility",
+                    "features": ["AC", "GPS", "Flexible routes"]
+                },
+                {
+                    "type": "taxi",
+                    "title": "Taxi/Cab Services",
+                    "provider": "Ola / Uber",
+                    "description": "On-demand cab services",
+                    "daily_cost": 800,
+                    "total_cost": int(transport_budget * 0.3),
+                    "duration": f"{duration} days",
+                    "coverage": "Point-to-point travel",
+                    "availability": "24/7",
+                    "booking_info": "Book via app",
+                    "suitable_for": "Short trips, convenience",
+                    "features": ["AC", "Real-time tracking"]
+                }
+            ],
+            "total_estimated_cost": transport_budget,
+            "recommended_option": trip_data.get('transportation_preference', 'mixed'),
+            "tips": ["Book in advance for better rates", "Mix of taxi and public transport works well"]
+        }
+    
+    def _get_fallback_travel_details(self, trip_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback travel details when AI fails"""
+        destination = trip_data.get('destination', 'India')
+        duration = trip_data.get('duration', trip_data.get('total_days', 3))
+        total_budget = trip_data.get('total_budget', 50000)
+        travelers = trip_data.get('travelers', 2)
+        travel_budget = total_budget * 0.45
+        travel_budget_per_person = travel_budget / travelers
+        
+        return {
+            "destination": destination,
+            "duration_days": duration,
+            "total_budget": travel_budget,
+            "travel_budget_per_person": travel_budget_per_person,
+            "travelers": travelers,
+            "outbound_options": [
+                {
+                    "type": "flight",
+                    "title": f"Flight to {destination}",
+                    "provider": "IndiGo / Air India",
+                    "route": f"Delhi → {destination}",
+                    "duration": "2h 30m",
+                    "departure_time": "08:30 AM",
+                    "arrival_time": "11:00 AM",
+                    "cost_per_person": int(travel_budget_per_person * 0.55),
+                    "total_cost": int(travel_budget_per_person * 0.55 * travelers),
+                    "class": "Economy",
+                    "booking_info": "Book 2-3 months in advance",
+                    "features": ["Fastest option", "Comfortable"]
+                }
+            ],
+            "return_options": [
+                {
+                    "type": "flight",
+                    "title": "Return Flight",
+                    "provider": "SpiceJet / Vistara",
+                    "route": f"{destination} → Delhi",
+                    "duration": "2h 45m",
+                    "departure_time": "06:15 PM",
+                    "arrival_time": "09:00 PM",
+                    "cost_per_person": int(travel_budget_per_person * 0.45),
+                    "total_cost": int(travel_budget_per_person * 0.45 * travelers),
+                    "class": "Economy",
+                    "booking_info": "Round-trip bookings often cheaper",
+                    "features": ["Return journey"]
+                }
+            ],
+            "total_estimated_cost": travel_budget,
+            "recommended_combination": "Mix based on preference",
+            "tips": ["Book flights 2-3 months in advance", "Consider travel time vs cost"]
+        }
 
 
 # Create service instance

@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Body, Query
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import uuid
 import logging
 from datetime import datetime, timedelta
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +13,8 @@ from ...models.trip import Trip, DailyItinerary, TripOption
 from ...services.google_ai_service import google_ai_service
 from ...services.google_maps_service import google_maps_service
 from ...services.smart_adjustments_service import smart_adjustments_service
+from ...services.translation_service import translation_service
+from ...services.content_cache_service import content_cache_service
 from ...core.config import settings
 from ..schemas.trip import (
     TripCreate, TripResponse, TripUpdate,
@@ -160,7 +163,7 @@ async def generate_trip_options(
     options_request: TripOptionsGenerate = Body(default=TripOptionsGenerate()),
     db: Session = Depends(get_db)
 ):
-    """Generate multiple trip options using AI"""
+    """Generate multiple trip options using AI with optional automatic translation"""
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
@@ -192,6 +195,26 @@ async def generate_trip_options(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to generate trip options"
             )
+        
+        # Store original (non-translated) content in cache
+        await content_cache_service.store(
+            trip_id=trip_id,
+            content_type="trip_options",
+            content=ai_options,
+            ttl_hours=24
+        )
+        
+        # Automatically translate if language is specified and not English
+        target_language = options_request.language or "english"
+        if target_language.lower() != "english":
+            logger.info(f"Translating trip options to {target_language}")
+            translated_options = []
+            for option in ai_options:
+                translated_option = await translation_service.translate_itinerary(
+                    option, target_language
+                )
+                translated_options.append(translated_option)
+            ai_options = translated_options
         
         # Save options to database
         saved_options = []
@@ -227,14 +250,79 @@ async def generate_trip_options(
         )
 
 
+@router.get("/{trip_id}/trip-structure", response_model=Dict[str, Any])
+async def get_or_generate_trip_structure(trip_id: str, db: Session = Depends(get_db)):
+    """Get or generate trip structure (main places per day) for ensuring diversity"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    try:
+        # Check cache first
+        cached_structure = await content_cache_service.get(trip_id, "trip_structure")
+        
+        if cached_structure:
+            logger.info(f"Returning cached trip structure for trip {trip_id}")
+            return {
+                "trip_id": trip_id,
+                "structure": cached_structure,
+                "cached": True
+            }
+        
+        # Prepare trip data
+        trip_data = {
+            "destination": trip.destination,
+            "start_date": trip.start_date.isoformat(),
+            "end_date": trip.end_date.isoformat(),
+            "total_budget": trip.total_budget,
+            "travelers": trip.travelers,
+            "themes": trip.themes or [],
+            "accommodation_preference": trip.accommodation_preference,
+            "transportation_preference": trip.transportation_preference,
+            "food_preference": trip.food_preference,
+            "special_requirements": trip.special_requirements,
+            "duration": (trip.end_date - trip.start_date).days + 1
+        }
+        
+        logger.info(f"Generating trip structure for {trip_data['duration']}-day trip to {trip.destination}")
+        
+        # Generate trip structure
+        structure = await google_ai_service.generate_trip_structure(trip_data)
+        
+        # Cache the structure
+        await content_cache_service.store(
+            trip_id=trip_id,
+            content_type="trip_structure",
+            content=structure,
+            ttl_hours=24
+        )
+        
+        return {
+            "trip_id": trip_id,
+            "structure": structure,
+            "cached": False
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating trip structure: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating trip structure: {str(e)}"
+        )
+
+
 @router.post("/{trip_id}/generate-day/{day_number}", response_model=Dict[str, Any])
 async def generate_single_day_itinerary(
     trip_id: str,
     day_number: int,
     option_id: str = None,
+    language: str = Query(default="english", description="Target language for translation"),
     db: Session = Depends(get_db)
 ):
-    """Generate itinerary for a specific day (lazy loading)"""
+    """Generate itinerary for a specific day (lazy loading) with optional automatic translation"""
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
@@ -249,6 +337,51 @@ async def generate_single_day_itinerary(
         )
     
     try:
+        # Check cache first for this specific day
+        content_type = f"daily_itinerary_{day_number}"
+        cached_itinerary = await content_cache_service.get(trip_id, content_type)
+        
+        if cached_itinerary:
+            logger.info(f"Found cached itinerary for day {day_number}, returning cached version")
+            # Still translate if needed
+            if language.lower() != "english":
+                logger.info(f"Translating cached day {day_number} itinerary to {language}")
+                cached_itinerary = await translation_service.translate_itinerary(
+                    cached_itinerary, language
+                )
+            return {
+                "day_number": day_number,
+                "itinerary": cached_itinerary,
+                "trip_id": trip_id,
+                "cached": True
+            }
+        
+        # Get or generate trip structure for diversity
+        trip_structure = await content_cache_service.get(trip_id, "trip_structure")
+        if not trip_structure:
+            # Generate structure if not cached
+            trip_data_for_structure = {
+                "destination": trip.destination,
+                "start_date": trip.start_date.isoformat(),
+                "end_date": trip.end_date.isoformat(),
+                "total_budget": trip.total_budget,
+                "travelers": trip.travelers,
+                "themes": trip.themes or [],
+                "accommodation_preference": trip.accommodation_preference,
+                "transportation_preference": trip.transportation_preference,
+                "food_preference": trip.food_preference,
+                "special_requirements": trip.special_requirements,
+                "duration": (trip.end_date - trip.start_date).days + 1
+            }
+            trip_structure = await google_ai_service.generate_trip_structure(trip_data_for_structure)
+            await content_cache_service.store(
+                trip_id=trip_id,
+                content_type="trip_structure",
+                content=trip_structure,
+                ttl_hours=24
+            )
+            logger.info(f"Generated and cached trip structure for trip {trip_id}")
+        
         # Prepare trip data for AI
         trip_data = {
             "destination": trip.destination,
@@ -265,13 +398,30 @@ async def generate_single_day_itinerary(
             "day_number": day_number
         }
         
-        # Generate single day itinerary using AI
-        day_itinerary = await google_ai_service.generate_daily_itinerary(trip_data, day_number)
+        logger.info(f"Generating NEW itinerary for day {day_number} of {trip_data['duration']}-day trip to {trip.destination}")
+        
+        # Generate single day itinerary using AI with trip structure
+        day_itinerary = await google_ai_service.generate_daily_itinerary(trip_data, day_number, trip_structure)
         
         if not day_itinerary:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to generate day itinerary"
+            )
+        
+        # Store original (non-translated) content in cache
+        await content_cache_service.store(
+            trip_id=trip_id,
+            content_type=f"daily_itinerary_{day_number}",
+            content=day_itinerary,
+            ttl_hours=24
+        )
+        
+        # Automatically translate if language is specified and not English
+        if language.lower() != "english":
+            logger.info(f"Translating day {day_number} itinerary to {language}")
+            day_itinerary = await translation_service.translate_itinerary(
+                day_itinerary, language
             )
         
         return {
@@ -293,7 +443,7 @@ async def generate_optimized_trip_options(
     options_request: TripOptionsGenerate = Body(default=TripOptionsGenerate()),
     db: Session = Depends(get_db)
 ):
-    """Generate trip options using hybrid loading strategy for optimal performance"""
+    """Generate trip options using hybrid loading strategy for optimal performance with optional automatic translation"""
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
@@ -325,6 +475,26 @@ async def generate_optimized_trip_options(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to generate optimized trip options"
             )
+        
+        # Store original (non-translated) content in cache
+        await content_cache_service.store(
+            trip_id=trip_id,
+            content_type="trip_options",
+            content=ai_options,
+            ttl_hours=24
+        )
+        
+        # Automatically translate if language is specified and not English
+        target_language = options_request.language or "english"
+        if target_language.lower() != "english":
+            logger.info(f"Translating optimized trip options to {target_language}")
+            translated_options = []
+            for option in ai_options:
+                translated_option = await translation_service.translate_itinerary(
+                    option, target_language
+                )
+                translated_options.append(translated_option)
+            ai_options = translated_options
         
         logger.info(f"Successfully generated {len(ai_options)} optimized trip options")
         return ai_options
@@ -503,6 +673,7 @@ async def search_places(
 @router.get("/{trip_id}/photos", response_model=Dict[str, Any])
 async def get_destination_photos(trip_id: str, db: Session = Depends(get_db)):
     """Return a list of destination photo URLs using Google Places Photos API.
+    Optimized with parallel search strategies.
     Requires Google Maps Platform API key with Places API enabled.
     """
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
@@ -519,30 +690,138 @@ async def get_destination_photos(trip_id: str, db: Session = Depends(get_db)):
         )
 
     try:
-        # Prefer attractions near destination coordinates
+        # Get coordinates first
         coords = await google_maps_service.geocode_address(trip.destination)
+        logger.info(f"Geocoded {trip.destination} to coordinates: {coords}")
+        
         places = []
+        
+        # Run multiple search strategies in parallel for better performance
         if coords:
-            places = await google_maps_service.get_nearby_attractions(coords, radius=15000)
-        if not places:
+            search_tasks = [
+                google_maps_service.get_nearby_attractions(coords, radius=15000),
+                google_maps_service.search_places(query=trip.destination),
+                google_maps_service.search_places(
+                    query="tourist attractions",
+                    location=coords,
+                    radius=10000
+                ),
+                google_maps_service.search_places(
+                    query=f"{trip.destination} monuments temples",
+                    location=coords,
+                    radius=15000
+                )
+            ]
+            
+            # Execute all searches in parallel
+            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            
+            # Collect results from successful searches
+            for result in search_results:
+                if isinstance(result, list) and result:
+                    places.extend(result)
+                    if len(places) >= 10:  # We have enough places
+                        break
+            
+            # Remove duplicates based on place_id
+            seen_ids = set()
+            unique_places = []
+            for p in places:
+                place_id = p.get("place_id")
+                if place_id and place_id not in seen_ids:
+                    seen_ids.add(place_id)
+                    unique_places.append(p)
+                    if len(unique_places) >= 10:
+                        break
+            places = unique_places
+            
+            logger.info(f"Found {len(places)} unique places from parallel searches")
+        else:
+            # Fallback: single search without coordinates
             places = await google_maps_service.search_places(query=trip.destination)
+            logger.info(f"Found {len(places)} places searching for '{trip.destination}'")
 
         photo_urls: List[str] = []
         api_key = settings.google_maps_api_key
 
+        # Extract photos from places that already have photos
+        logger.info(f"Processing {len(places)} places for photos")
+        places_with_photos = []
+        places_without_photos = []
+        
         for p in places:
-            for ph in (p.get("photos") or [])[:3]:  # take up to 3 photos per place
-                ref = ph.get("photo_reference") or ph.get("photoReference")
+            photos_list = p.get("photos") or []
+            if photos_list:
+                places_with_photos.append(p)
+            else:
+                places_without_photos.append(p)
+        
+        # Process places with photos first
+        for p in places_with_photos:
+            place_name = p.get("name", "Unknown")
+            photos_list = p.get("photos") or []
+            
+            for ph in photos_list[:3]:  # take up to 3 photos per place
+                if isinstance(ph, dict):
+                    ref = ph.get("photo_reference") or ph.get("photoReference")
+                elif isinstance(ph, str):
+                    ref = ph
+                else:
+                    continue
+                
                 if ref:
                     url = (
-                        f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=1200&photo_reference={ref}&key={api_key}"
+                        f"https://maps.googleapis.com/maps/api/place/photo"
+                        f"?maxwidth=1200&photo_reference={ref}&key={api_key}"
                     )
                     photo_urls.append(url)
+            
             if len(photo_urls) >= 12:
                 break
+        
+        # If we don't have enough photos, fetch place details in parallel for places without photos
+        if len(photo_urls) < 12 and places_without_photos:
+            logger.info(f"Fetching place details in parallel for {min(5, len(places_without_photos))} places...")
+            detail_tasks = []
+            for p in places_without_photos[:5]:
+                place_id = p.get("place_id")
+                if place_id:
+                    detail_tasks.append(google_maps_service.get_place_details(place_id))
+            
+            if detail_tasks:
+                detail_results = await asyncio.gather(*detail_tasks, return_exceptions=True)
+                
+                for place_details in detail_results:
+                    if isinstance(place_details, dict):
+                        detail_photos = place_details.get("photos") or []
+                        if detail_photos:
+                            logger.debug(f"Found {len(detail_photos)} photos in place details for {place_details.get('name')}")
+                            for ph in detail_photos[:3]:
+                                if isinstance(ph, dict):
+                                    ref = ph.get("photo_reference") or ph.get("photoReference")
+                                    if ref:
+                                        url = (
+                                            f"https://maps.googleapis.com/maps/api/place/photo"
+                                            f"?maxwidth=1200&photo_reference={ref}&key={api_key}"
+                                        )
+                                        photo_urls.append(url)
+                        
+                        if len(photo_urls) >= 12:
+                            break
+        
+        # If we still don't have photos, log detailed info
+        if not photo_urls:
+            logger.warning(
+                f"No photos found for destination: {trip.destination}. "
+                f"Searched {len(places)} places. "
+                f"Coordinates: {coords}"
+            )
+            return {"destination": trip.destination, "photos": []}
 
+        logger.info(f"Successfully found {len(photo_urls)} photos for {trip.destination}")
         return {"destination": trip.destination, "photos": photo_urls[:12]}
     except Exception as e:
+        logger.error(f"Error fetching destination photos: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching destination photos: {str(e)}"
@@ -726,12 +1005,71 @@ async def adjust_itinerary(
                 daily_itinerary.transport = adjusted_itinerary.get("transport", daily_itinerary.transport) or adjusted_itinerary.get("transportation")
         
         elif adjustment_type == "traffic":
-            # For traffic, mainly update transport timing
+            # For traffic, mainly update transport timing and suggest alternatives
             transport = daily_itinerary.transport or {}
             if isinstance(transport, dict):
+                route_info = adjustment_data.get("route_info", {})
                 transport["adjusted_timing"] = adjustment_data.get("suggested_departure_time")
+                transport["traffic_delay_minutes"] = route_info.get("traffic_delay_seconds", 0) / 60
+                transport["duration_in_traffic"] = route_info.get("duration_in_traffic")
                 transport["alternative_route"] = adjustment_data.get("alternative_route")
                 daily_itinerary.transport = transport
+        
+        elif adjustment_type == "route":
+            # For route updates, update transport with new route
+            route_info = adjustment_data.get("route_info", {})
+            recommended_route = route_info.get("recommended_route", {})
+            transport = daily_itinerary.transport or {}
+            if isinstance(transport, dict):
+                transport["updated_route"] = recommended_route.get("summary", "")
+                transport["route_duration"] = recommended_route.get("duration", "")
+                transport["route_distance"] = recommended_route.get("distance", "")
+                transport["route_polyline"] = recommended_route.get("overview_polyline", "")
+                transport["time_saved_minutes"] = route_info.get("time_saved_minutes", 0)
+                daily_itinerary.transport = transport
+            
+            # Optionally update activities timing if route affects schedule
+            if recommended_route:
+                activities = daily_itinerary.activities or []
+                if activities:
+                    # Adjust first activity timing if needed
+                    for activity in activities[:1]:
+                        if isinstance(activity, dict):
+                            # Could add logic here to adjust timing based on route changes
+                            pass
+        
+        elif adjustment_type == "alert":
+            # For place closures, use AI to suggest alternatives or remove activities
+            place_info = adjustment_data.get("place_info", {})
+            place_name = place_info.get("name", "")
+            issue_type = place_info.get("issue_type", "")
+            
+            if issue_type in ["closed_permanently", "closed_temporarily"]:
+                # Remove or replace closed places from itinerary
+                activities = daily_itinerary.activities or []
+                if isinstance(activities, list):
+                    # Filter out closed place
+                    daily_itinerary.activities = [
+                        act for act in activities
+                        if isinstance(act, dict) and act.get("name", "").lower() != place_name.lower()
+                        and act.get("place", "").lower() != place_name.lower()
+                        and act.get("activity", "").lower() != place_name.lower()
+                    ]
+                    
+                    # Use AI to suggest replacement if place was removed
+                    if len(activities) > len(daily_itinerary.activities):
+                        trip_data = {
+                            "destination": trip.destination,
+                            "date": target_date.isoformat(),
+                            "current_itinerary": {
+                                "activities": daily_itinerary.activities,
+                                "meals": daily_itinerary.meals or [],
+                            },
+                            "removed_place": place_name,
+                            "reason": f"Place is {issue_type.replace('_', ' ')}"
+                        }
+                        # Generate replacement suggestion (optional - can be async)
+                        # adjusted_itinerary = await google_ai_service.suggest_alternative_place(...)
         
         daily_itinerary.updated_at = datetime.utcnow()
         db.commit()
@@ -757,3 +1095,516 @@ async def adjust_itinerary(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error adjusting itinerary: {str(e)}"
         )
+
+
+@router.get("/{trip_id}/transport-details", response_model=Dict[str, Any])
+async def get_transport_details(trip_id: str, db: Session = Depends(get_db)):
+    """Get local transport details (city/local transport) based on budget and total days"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    try:
+        # Calculate total days
+        total_days = (trip.end_date - trip.start_date).days + 1
+        
+        # Prepare trip data for AI service
+        trip_data = {
+            "destination": trip.destination,
+            "duration": total_days,
+            "total_days": total_days,
+            "total_budget": trip.total_budget,
+            "travelers": trip.travelers,
+            "transportation_preference": trip.transportation_preference,
+            "start_date": trip.start_date.isoformat(),
+            "end_date": trip.end_date.isoformat()
+        }
+        
+        # Generate transport details using AI
+        transport_details = await google_ai_service.generate_transport_details(trip_data)
+        
+        # Store original content in cache
+        await content_cache_service.store(
+            trip_id=trip_id,
+            content_type="transport_details",
+            content=transport_details,
+            ttl_hours=24
+        )
+        
+        return transport_details
+        
+    except Exception as e:
+        logger.error(f"Error fetching transport details: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching transport details: {str(e)}"
+        )
+
+
+@router.get("/{trip_id}/travel-details", response_model=Dict[str, Any])
+async def get_travel_details(trip_id: str, db: Session = Depends(get_db)):
+    """Get inter-city travel details (flights, trains, buses) based on budget and total days"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    try:
+        # Calculate total days
+        total_days = (trip.end_date - trip.start_date).days + 1
+        
+        # Prepare trip data for AI service
+        trip_data = {
+            "destination": trip.destination,
+            "duration": total_days,
+            "total_days": total_days,
+            "total_budget": trip.total_budget,
+            "travelers": trip.travelers,
+            "transportation_preference": trip.transportation_preference,
+            "start_date": trip.start_date.isoformat(),
+            "end_date": trip.end_date.isoformat()
+        }
+        
+        # Generate travel details using AI
+        travel_details = await google_ai_service.generate_travel_details(trip_data)
+        
+        # Store original content in cache
+        await content_cache_service.store(
+            trip_id=trip_id,
+            content_type="travel_details",
+            content=travel_details,
+            ttl_hours=24
+        )
+        
+        return travel_details
+        
+    except Exception as e:
+        logger.error(f"Error fetching travel details: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching travel details: {str(e)}"
+        )
+
+
+@router.get("/{trip_id}/booking-prices", response_model=Dict[str, Any])
+async def get_booking_prices(trip_id: str, db: Session = Depends(get_db)):
+    """
+    Get calculated booking prices for flights and car rentals based on travel and transport data.
+    Filters options to ensure they stay within the user's budget.
+    """
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    try:
+        # Calculate total days
+        total_days = (trip.end_date - trip.start_date).days + 1
+        travelers = trip.travelers
+        total_budget = trip.total_budget
+        
+        # Fetch travel details (flights, trains, buses)
+        trip_data = {
+            "destination": trip.destination,
+            "duration": total_days,
+            "total_days": total_days,
+            "total_budget": trip.total_budget,
+            "travelers": trip.travelers,
+            "transportation_preference": trip.transportation_preference,
+            "start_date": trip.start_date.isoformat(),
+            "end_date": trip.end_date.isoformat()
+        }
+        
+        travel_details = await google_ai_service.generate_travel_details(trip_data)
+        transport_details = await google_ai_service.generate_transport_details(trip_data)
+        
+        # Calculate flight costs from travel details
+        flight_cost = 0
+        flight_options = []
+        
+        # Get flights from outbound and return options
+        for option in travel_details.get('outbound_options', []):
+            if option.get('type') == 'flight':
+                cost = option.get('total_cost') or (option.get('cost_per_person', 0) * travelers)
+                flight_cost += cost
+                flight_options.append({
+                    'type': 'outbound',
+                    'route': option.get('route', ''),
+                    'provider': option.get('provider', ''),
+                    'cost': cost,
+                    'cost_per_person': option.get('cost_per_person', 0),
+                    'departure_time': option.get('departure_time', ''),
+                    'arrival_time': option.get('arrival_time', ''),
+                    'class': option.get('class', 'Economy')
+                })
+        
+        for option in travel_details.get('return_options', []):
+            if option.get('type') == 'flight':
+                cost = option.get('total_cost') or (option.get('cost_per_person', 0) * travelers)
+                flight_cost += cost
+                flight_options.append({
+                    'type': 'return',
+                    'route': option.get('route', ''),
+                    'provider': option.get('provider', ''),
+                    'cost': cost,
+                    'cost_per_person': option.get('cost_per_person', 0),
+                    'departure_time': option.get('departure_time', ''),
+                    'arrival_time': option.get('arrival_time', ''),
+                    'class': option.get('class', 'Economy')
+                })
+        
+        # If no flights found, calculate estimated flight cost (25% of budget)
+        if flight_cost == 0:
+            flight_cost = int(total_budget * 0.25)
+        
+        # Calculate car rental costs from transport details
+        car_rental_cost = 0
+        car_rental_options = []
+        
+        for rec in transport_details.get('recommendations', []):
+            if rec.get('type') == 'car_rental':
+                cost = rec.get('total_cost') or (rec.get('daily_cost', 0) * total_days)
+                car_rental_cost += cost
+                car_rental_options.append({
+                    'provider': rec.get('provider', ''),
+                    'title': rec.get('title', 'Car Rental'),
+                    'cost': cost,
+                    'daily_cost': rec.get('daily_cost', 0),
+                    'duration': rec.get('duration', f'{total_days} days'),
+                    'description': rec.get('description', ''),
+                    'features': rec.get('features', [])
+                })
+        
+        # If no car rental found but preference is private, estimate cost
+        if car_rental_cost == 0 and trip.transportation_preference in ['private', 'mixed']:
+            transport_budget = total_budget * 0.18
+            car_rental_cost = int(transport_budget * 0.4)  # 40% of transport budget
+            car_rental_options.append({
+                'provider': 'Zoomcar / Ola Outstation',
+                'title': 'Car Rental',
+                'cost': car_rental_cost,
+                'daily_cost': int(car_rental_cost / total_days),
+                'duration': f'{total_days} days',
+                'description': 'Estimated car rental cost',
+                'features': ['AC', 'GPS', 'Flexible routes']
+            })
+        
+        # Calculate train costs (for alternative transport)
+        train_cost = 0
+        train_options = []
+        
+        for option in travel_details.get('outbound_options', []) + travel_details.get('return_options', []):
+            if option.get('type') == 'train':
+                cost = option.get('total_cost') or (option.get('cost_per_person', 0) * travelers)
+                train_cost += cost
+                train_options.append({
+                    'route': option.get('route', ''),
+                    'provider': option.get('provider', ''),
+                    'cost': cost,
+                    'cost_per_person': option.get('cost_per_person', 0),
+                    'class': option.get('class', '')
+                })
+        
+        # Total transportation cost
+        total_transportation_cost = flight_cost + car_rental_cost
+        
+        # Ensure we're within budget - adjust if needed
+        travel_budget = total_budget * 0.45
+        transport_budget = total_budget * 0.18
+        max_transportation_budget = travel_budget + transport_budget
+        
+        if total_transportation_cost > max_transportation_budget:
+            # Scale down proportionally
+            scale_factor = max_transportation_budget / total_transportation_cost
+            flight_cost = int(flight_cost * scale_factor)
+            car_rental_cost = int(car_rental_cost * scale_factor)
+            # Update options with scaled costs
+            for opt in flight_options:
+                opt['cost'] = int(opt['cost'] * scale_factor)
+            for opt in car_rental_options:
+                opt['cost'] = int(opt['cost'] * scale_factor)
+        
+        booking_prices_result = {
+            "flight": {
+                "total_cost": flight_cost,
+                "options": flight_options,
+                "count": len(flight_options)
+            },
+            "car_rental": {
+                "total_cost": car_rental_cost,
+                "options": car_rental_options,
+                "count": len(car_rental_options)
+            },
+            "train": {
+                "total_cost": train_cost,
+                "options": train_options,
+                "count": len(train_options)
+            },
+            "total_transportation_cost": flight_cost + car_rental_cost,
+            "budget_allocated": max_transportation_budget,
+            "budget_remaining": max_transportation_budget - (flight_cost + car_rental_cost),
+            "within_budget": (flight_cost + car_rental_cost) <= max_transportation_budget
+        }
+        
+        # Store original content in cache
+        await content_cache_service.store(
+            trip_id=trip_id,
+            content_type="booking_prices",
+            content=booking_prices_result,
+            ttl_hours=24
+        )
+        
+        return booking_prices_result
+        
+    except Exception as e:
+        logger.error(f"Error calculating booking prices: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error calculating booking prices: {str(e)}"
+        )
+
+
+@router.post("/translate", response_model=Dict[str, Any])
+async def translate_content(
+    content: Dict[str, Any] = Body(..., description="Content to translate"),
+    target_language: str = Body(..., description="Target language (e.g., 'kannada', 'hindi', 'tamil')"),
+    source_language: Optional[str] = Body(None, description="Source language (optional)")
+):
+    """
+    Translate content using Google Cloud Translation API
+    Supports translating text, lists, dictionaries, and nested structures
+    """
+    try:
+        if not content:
+            return {"translated": {}}
+        
+        # Translate the content
+        if isinstance(content, dict):
+            translated = await translation_service.translate_dict(content, target_language)
+        elif isinstance(content, list):
+            translated = await translation_service.translate_list_or_dict_list(content, target_language)
+        elif isinstance(content, str):
+            translated = await translation_service.translate_text(content, target_language, source_language)
+        else:
+            translated = content
+        
+        return {"translated": translated, "target_language": target_language}
+        
+    except Exception as e:
+        logger.error(f"Error translating content: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error translating content: {str(e)}"
+        )
+
+
+@router.post("/translate/itinerary", response_model=Dict[str, Any])
+async def translate_itinerary(
+    itinerary: Dict[str, Any] = Body(..., description="Itinerary data to translate"),
+    target_language: str = Body(..., description="Target language")
+):
+    """
+    Translate itinerary data structure including activities, meals, accommodation, etc.
+    """
+    try:
+        if not itinerary:
+            return {"translated": {}}
+        
+        translated = await translation_service.translate_itinerary(itinerary, target_language)
+        
+        return {"translated": translated, "target_language": target_language}
+        
+    except Exception as e:
+        logger.error(f"Error translating itinerary: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error translating itinerary: {str(e)}"
+        )
+
+
+@router.post("/translate/texts", response_model=Dict[str, Any])
+async def translate_texts(
+    texts: List[str] = Body(..., description="List of texts to translate"),
+    target_language: str = Body(..., description="Target language"),
+    source_language: Optional[str] = Body(None, description="Source language (optional)")
+):
+    """
+    Translate a list of texts
+    """
+    try:
+        if not texts:
+            return {"translated": []}
+        
+        translated = await translation_service.translate_list(texts, target_language, source_language)
+        
+        return {"translated": translated, "target_language": target_language}
+        
+    except Exception as e:
+        logger.error(f"Error translating texts: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error translating texts: {str(e)}"
+        )
+
+
+@router.post("/{trip_id}/translate-cached", response_model=Dict[str, Any])
+async def translate_cached_content_batch(
+    trip_id: str,
+    content_types: List[str] = Body(..., description="List of content types to translate (e.g., 'daily_itineraries', 'trip_options', 'transport_details')"),
+    target_language: str = Body(..., description="Target language"),
+    db: Session = Depends(get_db)
+):
+    """
+    Translate cached content in batches by content type.
+    Retrieves original content from cache and translates each type separately.
+    """
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    if target_language.lower() == "english":
+        return {
+            "message": "Target language is English, no translation needed",
+            "translated_content": {}
+        }
+    
+    try:
+        translated_results = {}
+        
+        for content_type in content_types:
+            # Get all cached content of this type
+            cached_items = await content_cache_service.get_all_by_type(trip_id, content_type)
+            
+            if not cached_items:
+                logger.warning(f"No cached content found for type: {content_type}")
+                translated_results[content_type] = None
+                continue
+            
+            # Use the most recent cached item
+            latest_item = max(cached_items, key=lambda x: x['created_at'])
+            original_content = latest_item['data']
+            
+            # Translate based on content type
+            if content_type.startswith("daily_itinerary_"):
+                # Translate daily itinerary
+                translated_content = await translation_service.translate_itinerary(
+                    original_content, target_language
+                )
+                translated_results[content_type] = translated_content
+            elif content_type == "trip_options":
+                # Translate trip options (list of options)
+                translated_options = []
+                for option in original_content:
+                    translated_option = await translation_service.translate_itinerary(
+                        option, target_language
+                    )
+                    translated_options.append(translated_option)
+                translated_results[content_type] = translated_options
+            else:
+                # Generic translation for other content types
+                translated_content = await translation_service.translate_dict(
+                    original_content, target_language
+                )
+                translated_results[content_type] = translated_content
+            
+            logger.info(f"Translated {content_type} to {target_language}")
+        
+        return {
+            "trip_id": trip_id,
+            "target_language": target_language,
+            "translated_content": translated_results
+        }
+        
+    except Exception as e:
+        logger.error(f"Error translating cached content: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error translating cached content: {str(e)}"
+        )
+
+
+@router.post("/{trip_id}/translate-daily-itineraries", response_model=Dict[str, Any])
+async def translate_all_daily_itineraries(
+    trip_id: str,
+    target_language: str = Body(..., description="Target language"),
+    db: Session = Depends(get_db)
+):
+    """
+    Translate all cached daily itineraries for a trip.
+    Fetches all daily itinerary content types and translates them separately.
+    """
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    if target_language.lower() == "english":
+        return {
+            "message": "Target language is English, no translation needed",
+            "translated_itineraries": {}
+        }
+    
+    try:
+        total_days = (trip.end_date - trip.start_date).days + 1
+        translated_itineraries = {}
+        
+        # Translate each day's itinerary separately
+        for day_number in range(1, total_days + 1):
+            content_type = f"daily_itinerary_{day_number}"
+            cached_items = await content_cache_service.get_all_by_type(trip_id, content_type)
+            
+            if cached_items:
+                latest_item = max(cached_items, key=lambda x: x['created_at'])
+                original_itinerary = latest_item['data']
+                
+                translated_itinerary = await translation_service.translate_itinerary(
+                    original_itinerary, target_language
+                )
+                translated_itineraries[str(day_number)] = translated_itinerary
+                logger.debug(f"Translated day {day_number} itinerary to {target_language}")
+            else:
+                logger.warning(f"No cached itinerary found for day {day_number}")
+        
+        return {
+            "trip_id": trip_id,
+            "target_language": target_language,
+            "translated_itineraries": translated_itineraries,
+            "total_days": total_days,
+            "translated_count": len(translated_itineraries)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error translating daily itineraries: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error translating daily itineraries: {str(e)}"
+        )
+
+
+@router.get("/{trip_id}/cache-stats", response_model=Dict[str, Any])
+async def get_cache_stats(
+    trip_id: str,
+    db: Session = Depends(get_db)
+):
+    """Get cache statistics for a trip"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    stats = await content_cache_service.get_cache_stats(trip_id=trip_id)
+    return stats

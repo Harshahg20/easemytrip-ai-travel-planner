@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Trip } from "../../entities/Trip";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
@@ -13,19 +13,65 @@ import {
   PartyPopper,
   Calendar,
   Users,
-  DollarSign,
   Train,
   Car,
   Bus,
 } from "lucide-react";
 import { useLanguage } from "../language/LanguageProvider";
+import { useTranslation } from "../../hooks/useTranslation";
 import { motion } from "framer-motion";
 
-export default function BookingPanel({ trip, onBookingComplete }) {
+function TranslatedFooter() {
+  const { translate } = useTranslation();
+  const [translatedText, setTranslatedText] = useState(
+    "Secure booking powered by"
+  );
+
+  useEffect(() => {
+    const translateText = async () => {
+      const text = "Secure booking powered by EaseMyTrip";
+      const translated = await translate(text);
+      setTranslatedText(translated || text);
+    };
+    translateText();
+  }, [translate]);
+
+  return (
+    <p className="text-xs text-slate-500 mt-3">
+      {translatedText.split("EaseMyTrip")[0]}
+      <span className="font-medium">EaseMyTrip</span>
+    </p>
+  );
+}
+
+export default function BookingPanel({ 
+  trip, 
+  onBookingComplete,
+  bookingPrices: bookingPricesProp = null,
+  loadingPrices: loadingPricesProp = false,
+  pricesError: pricesErrorProp = null
+}) {
   const { t } = useLanguage();
+  const { translate } = useTranslation();
   const [isBooking, setIsBooking] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [bookingDetails, setBookingDetails] = useState(null);
+  const [translatedDescription, setTranslatedDescription] = useState("");
+  
+  // Use props if provided, otherwise fallback to local state (for backwards compatibility)
+  const bookingPrices = bookingPricesProp;
+  const loadingPrices = loadingPricesProp;
+
+  // Translate booking description
+  useEffect(() => {
+    const translateDesc = async () => {
+      const desc =
+        "Ready to make it official? Book your flights, hotels, transport and activities in one click. We'll handle the rest with our partner, EaseMyTrip.";
+      const translated = await translate(desc);
+      setTranslatedDescription(translated);
+    };
+    translateDesc();
+  }, [translate]);
 
   const handleBookTrip = async () => {
     setIsBooking(true);
@@ -70,17 +116,33 @@ export default function BookingPanel({ trip, onBookingComplete }) {
 
   const totalCost =
     trip.selected_plan?.total_estimated_cost || trip.total_budget;
-  const flightCost = Math.round(totalCost * 0.25);
+
+  // Use actual booking prices if available, otherwise fallback to estimated percentages
+  const flightCost =
+    bookingPrices?.flight?.total_cost || Math.round(totalCost * 0.25);
+  const carRentalCost = bookingPrices?.car_rental?.total_cost || 0;
+  const trainCost = bookingPrices?.train?.total_cost || 0;
   const hotelCost = Math.round(totalCost * 0.4);
   const activityCost = Math.round(totalCost * 0.2);
-  const transportCost = Math.round(totalCost * 0.15);
 
-  // Generate transport options for booking
+  // Local transport cost (excluding car rental which is separate)
+  const localTransportCost = bookingPrices
+    ? Math.max(
+        0,
+        bookingPrices.total_transportation_cost - flightCost - carRentalCost
+      )
+    : Math.round(totalCost * 0.15);
+
+  // Generate transport options for booking based on actual prices
   const getTransportOptions = () => {
     const preference = trip.transportation_preference || "mixed";
     const options = [];
 
-    if (preference === "private" || preference === "mixed") {
+    // Add flights if available and within budget
+    if (
+      bookingPrices?.flight?.total_cost > 0 &&
+      (preference === "private" || preference === "mixed")
+    ) {
       options.push({
         type: "flight",
         title: "Flights",
@@ -88,31 +150,58 @@ export default function BookingPanel({ trip, onBookingComplete }) {
         cost: flightCost,
         color: "bg-blue-500",
         lightColor: "bg-blue-50",
+        count: bookingPrices.flight.count || 0,
+        withinBudget: bookingPrices?.within_budget !== false,
       });
     }
 
-    if (preference === "public" || preference === "mixed") {
+    // Add train if available and preference allows
+    if (trainCost > 0 && (preference === "public" || preference === "mixed")) {
       options.push({
         type: "train",
-        title: "Train Tickets",
+        title: t("trainTickets"),
         icon: Train,
-        cost: Math.round(totalCost * 0.15),
+        cost: trainCost,
         color: "bg-green-500",
         lightColor: "bg-green-50",
+        count: bookingPrices?.train?.count || 0,
+        withinBudget: bookingPrices?.within_budget !== false,
       });
     }
 
-    options.push({
-      type: "local",
-      title: preference === "private" ? "Car Rental" : "Local Transport",
-      icon: preference === "private" ? Car : Bus,
-      cost:
-        preference === "private"
-          ? Math.round(totalCost * 0.2)
-          : Math.round(totalCost * 0.05),
-      color: preference === "private" ? "bg-purple-500" : "bg-orange-500",
-      lightColor: preference === "private" ? "bg-purple-50" : "bg-orange-50",
-    });
+    // Add car rental if available
+    if (
+      carRentalCost > 0 &&
+      (preference === "private" || preference === "mixed")
+    ) {
+      options.push({
+        type: "car_rental",
+        title: t("carRental"),
+        icon: Car,
+        cost: carRentalCost,
+        color: "bg-purple-500",
+        lightColor: "bg-purple-50",
+        count: bookingPrices?.car_rental?.count || 0,
+        withinBudget: bookingPrices?.within_budget !== false,
+      });
+    }
+
+    // Add local transport if car rental is not available or preference is public
+    if (
+      (preference === "public" ||
+        (preference === "mixed" && carRentalCost === 0)) &&
+      localTransportCost > 0
+    ) {
+      options.push({
+        type: "local",
+        title: t("localTransport"),
+        icon: Bus,
+        cost: localTransportCost,
+        color: "bg-orange-500",
+        lightColor: "bg-orange-50",
+        withinBudget: bookingPrices?.within_budget !== false,
+      });
+    }
 
     return options;
   };
@@ -173,40 +262,105 @@ export default function BookingPanel({ trip, onBookingComplete }) {
         <CardContent className="space-y-6">
           <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg p-4 border border-blue-200">
             <p className="text-sm text-slate-700 leading-relaxed">
-              Ready to make it official? Book your flights, hotels, transport
-              and activities in one click. We'll handle the rest with our
-              partner,{" "}
+              {translatedDescription ||
+                "Ready to make it official? Book your flights, hotels, transport and activities in one click. We'll handle the rest with our partner, EaseMyTrip."}{" "}
               <span className="font-semibold text-blue-700">EaseMyTrip</span>.
             </p>
           </div>
 
           <div className="space-y-4">
-            {/* Transport Options */}
-            {transportOptions.map((transport, index) => (
+            {/* Loading State */}
+            {loadingPrices && (
+              <div className="flex justify-center items-center p-4">
+                <Loader2 className="w-5 h-5 animate-spin text-slate-400 mr-2" />
+                <span className="text-sm text-slate-600">
+                  {t("loadingTrip")}
+                </span>
+              </div>
+            )}
+
+            {/* Budget Status */}
+            {bookingPrices && !loadingPrices && (
               <div
-                key={index}
-                className={`flex justify-between items-center p-4 ${transport.lightColor} rounded-lg border`}
+                className={`p-3 rounded-lg border ${
+                  bookingPrices.within_budget
+                    ? "bg-emerald-50 border-emerald-200"
+                    : "bg-amber-50 border-amber-200"
+                }`}
               >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-10 h-10 ${transport.color} rounded-full flex items-center justify-center`}
+                <div className="flex justify-between items-center text-sm">
+                  <span
+                    className={
+                      bookingPrices.within_budget
+                        ? "text-emerald-700"
+                        : "text-amber-700"
+                    }
                   >
-                    <transport.icon className="w-5 h-5 text-white" />
-                  </div>
-                  <span className="font-semibold text-slate-800">
-                    {transport.title}
+                    {t("transportationBudget")}: ₹
+                    {bookingPrices.budget_allocated?.toLocaleString() || 0}
+                  </span>
+                  <span
+                    className={`font-semibold ${
+                      bookingPrices.within_budget
+                        ? "text-emerald-700"
+                        : "text-amber-700"
+                    }`}
+                  >
+                    {bookingPrices.within_budget
+                      ? `✓ ${t("withinBudget")}`
+                      : `⚠ ${t("nearBudgetLimit")}`}
                   </span>
                 </div>
-                <div className="text-right">
-                  <div className="font-bold text-slate-900">
-                    ₹{transport.cost.toLocaleString()}
+                {bookingPrices.budget_remaining !== undefined && (
+                  <div className="text-xs text-slate-600 mt-1">
+                    {t("remaining")} ₹
+                    {Math.max(
+                      0,
+                      bookingPrices.budget_remaining
+                    ).toLocaleString()}
                   </div>
-                  <div className="text-xs text-slate-500">
-                    {t("estimatedCost")}
+                )}
+              </div>
+            )}
+
+            {/* Transport Options */}
+            {!loadingPrices &&
+              transportOptions.map((transport, index) => (
+                <div
+                  key={index}
+                  className={`flex justify-between items-center p-4 ${
+                    transport.lightColor
+                  } rounded-lg border ${
+                    transport.withinBudget === false ? "border-amber-300" : ""
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-10 h-10 ${transport.color} rounded-full flex items-center justify-center`}
+                    >
+                      <transport.icon className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                      <span className="font-semibold text-slate-800">
+                        {transport.title}
+                      </span>
+                      {transport.count > 0 && (
+                        <div className="text-xs text-slate-500">
+                          {transport.count} {transport.count !== 1 ? t("details") : t("details")}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="font-bold text-slate-900">
+                      ₹{transport.cost.toLocaleString()}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {bookingPrices ? t("calculatedCost") : t("estimatedCost")}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              ))}
 
             {/* Hotels */}
             <div className="flex justify-between items-center p-4 bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg border border-purple-100">
@@ -254,7 +408,7 @@ export default function BookingPanel({ trip, onBookingComplete }) {
             <div className="bg-slate-50 rounded-lg p-4 mb-4 border">
               <div className="flex justify-between items-center">
                 <span className="text-lg font-semibold text-slate-800">
-                  Total Cost:
+                  {t("totalCost") || "Total Cost:"}
                 </span>
                 <span className="text-2xl font-bold text-slate-900">
                   ₹{totalCost.toLocaleString()}
@@ -280,10 +434,7 @@ export default function BookingPanel({ trip, onBookingComplete }) {
                   </>
                 )}
               </Button>
-              <p className="text-xs text-slate-500 mt-3">
-                Secure booking powered by{" "}
-                <span className="font-medium">EaseMyTrip</span>
-              </p>
+              <TranslatedFooter />
             </div>
           </div>
         </CardContent>
@@ -348,7 +499,6 @@ export default function BookingPanel({ trip, onBookingComplete }) {
 
                   <div className="flex justify-between items-center">
                     <div className="flex items-center gap-2 text-slate-600">
-                      <DollarSign className="w-4 h-4" />
                       <span>Total Cost:</span>
                     </div>
                     <span className="font-bold text-green-700">

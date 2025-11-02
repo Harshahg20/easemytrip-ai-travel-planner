@@ -205,10 +205,21 @@ export const tripService = {
   },
 
   // Generate single day itinerary (lazy loading)
-  generateDayItinerary: async (tripId, dayNumber, optionId = null) => {
+  generateDayItinerary: async (
+    tripId,
+    dayNumber,
+    optionId = null,
+    language = "english"
+  ) => {
     try {
+      // Build URL with language query parameter
+      const url = `/trips/${tripId}/generate-day/${dayNumber}${
+        language && language !== "english"
+          ? `?language=${encodeURIComponent(language)}`
+          : ""
+      }`;
       const response = await api.post(
-        `/trips/${tripId}/generate-day/${dayNumber}`,
+        url,
         { option_id: optionId },
         {
           timeout: 120000, // 2 minutes timeout for single day generation
@@ -284,7 +295,9 @@ export const tripService = {
   // Get smart adjustments for a specific day
   getSmartAdjustments: async (tripId, dayNumber) => {
     try {
-      const response = await api.get(`/trips/${tripId}/smart-adjustments/${dayNumber}`);
+      const response = await api.get(
+        `/trips/${tripId}/smart-adjustments/${dayNumber}`
+      );
       return response.data;
     } catch (error) {
       console.error("Error fetching smart adjustments:", error);
@@ -293,7 +306,12 @@ export const tripService = {
   },
 
   // Adjust itinerary based on weather/traffic conditions
-  adjustItinerary: async (tripId, dayNumber, adjustmentType, adjustmentData) => {
+  adjustItinerary: async (
+    tripId,
+    dayNumber,
+    adjustmentType,
+    adjustmentData
+  ) => {
     try {
       const response = await api.post(
         `/trips/${tripId}/adjust-itinerary/${dayNumber}`,
@@ -308,6 +326,150 @@ export const tripService = {
       return response.data;
     } catch (error) {
       console.error("Error adjusting itinerary:", error);
+      throw error;
+    }
+  },
+
+  // Get transport details (local/city transport) based on budget and total days
+  getTransportDetails: async (tripId) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/transport-details`, {
+        timeout: 120000, // 2 minutes timeout for AI generation
+      });
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching transport details:", error);
+      throw error;
+    }
+  },
+
+  // Get travel details (inter-city travel: flights, trains, buses) based on budget and total days
+  getTravelDetails: async (tripId) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/travel-details`, {
+        timeout: 120000, // 2 minutes timeout for AI generation
+      });
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching travel details:", error);
+      throw error;
+    }
+  },
+
+  // Get booking prices for flights and car rentals based on travel/transport data
+  getBookingPrices: async (tripId) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/booking-prices`, {
+        timeout: 120000, // 2 minutes timeout
+      });
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching booking prices:", error);
+      throw error;
+    }
+  },
+
+  // Translate content
+  translateContent: async (content, targetLanguage, sourceLanguage = null) => {
+    try {
+      const response = await api.post("/trips/translate", {
+        content,
+        target_language: targetLanguage,
+        source_language: sourceLanguage,
+      });
+      return response.data.translated;
+    } catch (error) {
+      console.error("Error translating content:", error);
+      throw error;
+    }
+  },
+
+  // Translate itinerary
+  translateItinerary: async (itinerary, targetLanguage) => {
+    try {
+      const response = await api.post("/trips/translate/itinerary", {
+        itinerary,
+        target_language: targetLanguage,
+      });
+      return response.data.translated;
+    } catch (error) {
+      console.error("Error translating itinerary:", error);
+      throw error;
+    }
+  },
+
+  // Translate list of texts
+  translateTexts: async (texts, targetLanguage, sourceLanguage = null) => {
+    try {
+      const response = await api.post("/trips/translate/texts", {
+        texts,
+        target_language: targetLanguage,
+        source_language: sourceLanguage,
+      });
+      return response.data.translated;
+    } catch (error) {
+      console.error("Error translating texts:", error);
+      throw error;
+    }
+  },
+
+  // Translate cached content in batches by content type
+  translateCachedContent: async (tripId, contentTypes, targetLanguage) => {
+    try {
+      const response = await api.post(
+        `/trips/${tripId}/translate-cached`,
+        {
+          content_types: contentTypes,
+          target_language: targetLanguage,
+        },
+        {
+          timeout: 180000, // 3 minutes timeout for batch translation
+        }
+      );
+      return response.data.translated_content;
+    } catch (error) {
+      console.error("Error translating cached content:", error);
+      throw error;
+    }
+  },
+
+  // Translate all daily itineraries for a trip
+  translateDailyItineraries: async (tripId, targetLanguage) => {
+    try {
+      const response = await api.post(
+        `/trips/${tripId}/translate-daily-itineraries`,
+        {
+          target_language: targetLanguage,
+        },
+        {
+          timeout: 180000, // 3 minutes timeout for batch translation
+        }
+      );
+      return response.data.translated_itineraries;
+    } catch (error) {
+      console.error("Error translating daily itineraries:", error);
+      throw error;
+    }
+  },
+
+  // Get cache statistics for a trip
+  getCacheStats: async (tripId) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/cache-stats`);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching cache stats:", error);
+      throw error;
+    }
+  },
+
+  // Get or generate trip structure (main places per day)
+  getTripStructure: async (tripId) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/trip-structure`);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching trip structure:", error);
       throw error;
     }
   },

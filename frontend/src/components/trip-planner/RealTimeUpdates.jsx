@@ -18,6 +18,8 @@ const getIconForType = (type) => {
       return CloudSun;
     case "traffic":
       return Clock;
+    case "route":
+      return ArrowRight;
     case "opportunity":
       return Sparkles;
     case "alert":
@@ -37,6 +39,7 @@ const getColorForType = (type, severity) => {
   const typeMap = {
     weather: severityMap[severity] || "blue",
     traffic: severityMap[severity] || "amber",
+    route: "blue",
     opportunity: "emerald",
     alert: "red",
   };
@@ -104,10 +107,12 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
     setAdjusting({ ...adjusting, [adjustmentId]: true });
 
     try {
+      // Prepare adjustment data based on type
       const adjustmentData = {
         weather_data: adjustment.weather_data,
         affected_activities: adjustment.affected_activities,
         route_info: adjustment.route_info,
+        place_info: adjustment.place_info,
         attraction: adjustment.attraction,
       };
 
@@ -127,6 +132,9 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
       if (trip.onTripUpdate) {
         trip.onTripUpdate();
       }
+      
+      // Force page reload to show updated itinerary
+      window.location.reload();
     } catch (error) {
       console.error("Error adjusting itinerary:", error);
       alert(error.response?.data?.detail || "Could not adjust itinerary. Please try again.");
@@ -139,10 +147,10 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
     return (
       <Card className="border-slate-200 shadow-sm bg-white">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-amber-500" />
-            Smart Adjustments
-          </CardTitle>
+        <CardTitle className="flex items-center gap-2">
+          <Sparkles className="w-5 h-5 text-amber-500" />
+          Real-Time Updates
+        </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-center py-8">
@@ -160,10 +168,10 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
     return (
       <Card className="border-slate-200 shadow-sm bg-white">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-amber-500" />
-            Smart Adjustments
-          </CardTitle>
+        <CardTitle className="flex items-center gap-2">
+          <Sparkles className="w-5 h-5 text-amber-500" />
+          Real-Time Updates
+        </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-slate-600 mb-6">
@@ -183,13 +191,13 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Sparkles className="w-5 h-5 text-amber-500" />
-          Smart Adjustments
+          Real-Time Updates
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-slate-600 mb-6">
-          Your trip is alive! We monitor conditions in real-time to suggest
-          smart adjustments, ensuring you have the best possible experience.
+          Real-time updates: We monitor weather conditions, traffic congestion, route changes, 
+          and place availability to keep your itinerary optimized throughout your journey.
         </p>
         <div className="space-y-4">
           {adjustments.map((adjustment, index) => {

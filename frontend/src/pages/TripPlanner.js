@@ -23,12 +23,12 @@ import {
   DollarSign,
   Share2,
   Download,
-  Settings,
   Sparkles,
   Bus,
   Bot,
 } from "lucide-react";
 import { useLanguage } from "../components/language/LanguageProvider";
+import { useBatchTranslation } from "../hooks/useTranslation";
 
 import TripSummary from "../components/trip-planner/TripSummary";
 import DayItinerary from "../components/trip-planner/DayItinerary";
@@ -42,7 +42,12 @@ import DestinationCarousel from "../components/trip-planner/DestinationCarousel"
 
 export default function TripPlanner() {
   const navigate = useNavigate();
-  const { t } = useLanguage();
+  const { t, currentLanguage } = useLanguage();
+  const {
+    translateCachedContent,
+    translateAllDailyItineraries,
+    isTranslating: isBatchTranslating,
+  } = useBatchTranslation();
   const [trip, setTrip] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -53,6 +58,106 @@ export default function TripPlanner() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [loadingDays, setLoadingDays] = useState(new Set()); // Track which days are being loaded
   const [loadedDays, setLoadedDays] = useState(new Set([1])); // Track which days are already loaded
+  const [translatedContent, setTranslatedContent] = useState({}); // Store translated content
+
+  // Parallel loading states for different components
+  const [photos, setPhotos] = useState([]);
+  const [loadingPhotos, setLoadingPhotos] = useState(true);
+  const [photosError, setPhotosError] = useState(null);
+
+  const [bookingPrices, setBookingPrices] = useState(null);
+  const [loadingBookingPrices, setLoadingBookingPrices] = useState(true);
+  const [bookingPricesError, setBookingPricesError] = useState(null);
+
+  const [transportDetails, setTransportDetails] = useState(null);
+  const [loadingTransportDetails, setLoadingTransportDetails] = useState(true);
+  const [transportDetailsError, setTransportDetailsError] = useState(null);
+
+  const [travelDetails, setTravelDetails] = useState(null);
+  const [loadingTravelDetails, setLoadingTravelDetails] = useState(true);
+  const [travelDetailsError, setTravelDetailsError] = useState(null);
+
+  // Fetch all component data in parallel
+  const fetchAllComponentData = useCallback(async (tripId) => {
+    // Reset loading states
+    setLoadingPhotos(true);
+    setPhotosError(null);
+    setLoadingBookingPrices(true);
+    setBookingPricesError(null);
+    setLoadingTransportDetails(true);
+    setTransportDetailsError(null);
+    setLoadingTravelDetails(true);
+    setTravelDetailsError(null);
+
+    // Start all API calls in parallel using Promise.allSettled
+    // This ensures all APIs are called simultaneously and we handle each result independently
+    const promises = {
+      photos: tripService.getDestinationPhotos(tripId).catch((err) => {
+        console.error("Error fetching photos:", err);
+        throw err;
+      }),
+      bookingPrices: tripService.getBookingPrices(tripId).catch((err) => {
+        console.error("Error fetching booking prices:", err);
+        throw err;
+      }),
+      transportDetails: tripService.getTransportDetails(tripId).catch((err) => {
+        console.error("Error fetching transport details:", err);
+        throw err;
+      }),
+      travelDetails: tripService.getTravelDetails(tripId).catch((err) => {
+        console.error("Error fetching travel details:", err);
+        throw err;
+      }),
+    };
+
+    // Handle photos (non-blocking - component will show loading state)
+    promises.photos
+      .then((data) => {
+        setPhotos(data.photos || []);
+        setPhotosError(null);
+      })
+      .catch((err) => {
+        setPhotosError("Failed to load photos");
+        setPhotos([]);
+      })
+      .finally(() => setLoadingPhotos(false));
+
+    // Handle booking prices (non-blocking)
+    promises.bookingPrices
+      .then((data) => {
+        setBookingPrices(data);
+        setBookingPricesError(null);
+      })
+      .catch((err) => {
+        setBookingPricesError("Failed to load booking prices");
+        setBookingPrices(null);
+      })
+      .finally(() => setLoadingBookingPrices(false));
+
+    // Handle transport details (non-blocking)
+    promises.transportDetails
+      .then((data) => {
+        setTransportDetails(data);
+        setTransportDetailsError(null);
+      })
+      .catch((err) => {
+        setTransportDetailsError("Failed to load transport details");
+        setTransportDetails(null);
+      })
+      .finally(() => setLoadingTransportDetails(false));
+
+    // Handle travel details (non-blocking)
+    promises.travelDetails
+      .then((data) => {
+        setTravelDetails(data);
+        setTravelDetailsError(null);
+      })
+      .catch((err) => {
+        setTravelDetailsError("Failed to load travel details");
+        setTravelDetails(null);
+      })
+      .finally(() => setLoadingTravelDetails(false));
+  }, []);
 
   const loadTripData = useCallback(async () => {
     setLoading(true);
@@ -78,6 +183,9 @@ export default function TripPlanner() {
 
       setTrip(fetchedTrip);
 
+      // Start fetching all component data in parallel (non-blocking)
+      fetchAllComponentData(tripId);
+
       // If option_id is provided, get the selected option and its itineraries
       if (optionId) {
         try {
@@ -87,10 +195,13 @@ export default function TripPlanner() {
 
           if (selectedOption) {
             // Initialize with first day only (lazy loading)
+            // Note: If options were saved before translation was added, they may be in English
+            // Client-side translation will handle this as fallback
             if (
               selectedOption.daily_itineraries &&
               selectedOption.daily_itineraries.length > 0
             ) {
+              // Set the itineraries - DayItinerary component will handle translation
               setDailyItineraries(selectedOption.daily_itineraries);
               setLoadedDays(new Set([1])); // Only first day is loaded initially
             } else {
@@ -114,11 +225,74 @@ export default function TripPlanner() {
     } finally {
       setLoading(false);
     }
-  }, [t, navigate]);
+  }, [t, navigate, fetchAllComponentData]);
 
   useEffect(() => {
     loadTripData();
   }, [loadTripData]);
+
+  // Translate cached content when language changes using batch translation
+  useEffect(() => {
+    const translateOnLanguageChange = async () => {
+      if (!trip?.id) return;
+
+      const urlParams = new URLSearchParams(window.location.search);
+      const tripId = urlParams.get("trip_id");
+
+      if (!tripId) return;
+
+      try {
+        // Translate all daily itineraries in batch
+        const translatedItineraries = await translateAllDailyItineraries(
+          tripId
+        );
+
+        if (
+          translatedItineraries &&
+          Object.keys(translatedItineraries).length > 0
+        ) {
+          // Update daily itineraries with translated content
+          setDailyItineraries((prev) => {
+            const updated = [...prev];
+            Object.keys(translatedItineraries).forEach((dayNum) => {
+              const dayIndex = parseInt(dayNum) - 1;
+              if (updated[dayIndex]) {
+                updated[dayIndex] = translatedItineraries[dayNum];
+              }
+            });
+            return updated;
+          });
+
+          // Also translate other content types in batch
+          const otherContentTypes = [
+            "transport_details",
+            "travel_details",
+            "booking_prices",
+          ];
+          const otherTranslated = await translateCachedContent(
+            tripId,
+            otherContentTypes
+          );
+
+          if (otherTranslated) {
+            setTranslatedContent((prev) => ({
+              ...prev,
+              ...otherTranslated,
+            }));
+          }
+        }
+      } catch (error) {
+        console.error("Error translating content on language change:", error);
+        // Fallback: reload current day if batch translation fails
+        if (selectedDay) {
+          loadDayItinerary(selectedDay);
+        }
+      }
+    };
+
+    translateOnLanguageChange();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentLanguage, trip?.id]);
 
   const handleDaySelect = async (dayNumber) => {
     setSelectedDay(dayNumber);
@@ -145,11 +319,18 @@ export default function TripPlanner() {
         throw new Error("No trip ID provided");
       }
 
-      // Generate the specific day itinerary
+      // Get current language and pass it to API for server-side translation
+      const currentLang =
+        currentLanguage ||
+        localStorage.getItem("tripora_language") ||
+        "english";
+
+      // Generate the specific day itinerary with language parameter
       const dayData = await tripService.generateDayItinerary(
         tripId,
         dayNumber,
-        optionId
+        optionId,
+        currentLang
       );
 
       if (dayData && dayData.itinerary) {
@@ -481,10 +662,6 @@ Generated by Tripora - AI Travel Planner
                   </>
                 )}
               </Button>
-              <Button variant="outline" size="sm" onClick={handleCustomize}>
-                <Settings className="w-4 h-4 mr-2" />
-                {t("customize")}
-              </Button>
             </div>
           </div>
         </div>
@@ -499,6 +676,9 @@ Generated by Tripora - AI Travel Planner
             <DestinationCarousel
               tripId={trip?.id}
               destination={trip?.destination}
+              photos={photos}
+              loading={loadingPhotos}
+              error={photosError}
             />
             {/* Sticky tabs header */}
             <div className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200">
@@ -545,7 +725,7 @@ Generated by Tripora - AI Travel Planner
                 />
               </TabsContent>
               <TabsContent value="updates" className="space-y-6">
-                <RealTimeUpdates trip={trip} />
+                <RealTimeUpdates trip={trip} selectedDay={selectedDay} />
               </TabsContent>
             </Tabs>
             {/* Full-width travel details at the end of left column */}
@@ -560,6 +740,12 @@ Generated by Tripora - AI Travel Planner
                 <TransportDetails
                   trip={trip}
                   dailyItineraries={dailyItineraries}
+                  transportDetails={transportDetails}
+                  loadingTransport={loadingTransportDetails}
+                  errorTransport={transportDetailsError}
+                  travelDetails={travelDetails}
+                  loadingTravel={loadingTravelDetails}
+                  errorTravel={travelDetailsError}
                 />
               </CardContent>
             </Card>
@@ -575,7 +761,13 @@ Generated by Tripora - AI Travel Planner
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <BookingPanel trip={trip} onBookingComplete={loadTripData} />
+                <BookingPanel
+                  trip={trip}
+                  onBookingComplete={loadTripData}
+                  bookingPrices={bookingPrices}
+                  loadingPrices={loadingBookingPrices}
+                  pricesError={bookingPricesError}
+                />
               </CardContent>
             </Card>
           </div>

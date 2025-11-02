@@ -125,6 +125,7 @@ class DailyItineraryResponse(BaseModel):
 
 class TripOptionsGenerate(BaseModel):
     force_regenerate: bool = Field(default=False, description="Force regeneration of options")
+    language: Optional[str] = Field(default="english", description="Target language for content translation (e.g., 'kannada', 'hindi', 'tamil')")
 
 
 class PlaceSearchRequest(BaseModel):
