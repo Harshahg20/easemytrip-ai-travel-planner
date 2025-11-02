@@ -263,7 +263,12 @@ class SmartAdjustmentsService:
             lat, lng = coordinates
             
             if self.weather_api_type == "google":
-                return await self._fetch_google_weather_data(coordinates, date)
+                result = await self._fetch_google_weather_data(coordinates, date)
+                # If Google Weather fails (returns empty), fall back to OpenWeather
+                if not result and settings.openweather_api_key:
+                    logger.warning("Google Weather API failed, falling back to OpenWeather")
+                    return await self._fetch_openweather_data(coordinates, date)
+                return result
             else:
                 return await self._fetch_openweather_data(coordinates, date)
                 
@@ -344,10 +349,10 @@ class SmartAdjustmentsService:
                 error_detail = e.response.text[:200] if e.response.text else str(e)
             
             logger.error(f"Google Weather API HTTP error: {e.response.status_code} - {error_detail}")
-            return {}
+            return self._generate_fallback_weather(coordinates, date)
         except Exception as e:
             logger.error(f"Error fetching Google weather data: {e}", exc_info=True)
-            return {}
+            return self._generate_fallback_weather(coordinates, date)
     
     async def _fetch_google_forecast_for_date(
         self,
@@ -417,7 +422,7 @@ class SmartAdjustmentsService:
                         }
                 
                 logger.warning(f"No forecast found for date {target_date_str}")
-                return {}
+                return self._generate_fallback_weather(coordinates, date)
                 
         except httpx.HTTPStatusError as e:
             error_detail = ""
@@ -428,10 +433,10 @@ class SmartAdjustmentsService:
                 error_detail = e.response.text[:200] if e.response.text else str(e)
             
             logger.error(f"Google Weather Forecast API HTTP error: {e.response.status_code} - {error_detail}")
-            return {}
+            return self._generate_fallback_weather(coordinates, date)
         except Exception as e:
             logger.error(f"Error fetching Google forecast for date: {e}", exc_info=True)
-            return {}
+            return self._generate_fallback_weather(coordinates, date)
     
     async def _fetch_openweather_data(
         self,
@@ -504,10 +509,92 @@ class SmartAdjustmentsService:
                     
         except httpx.HTTPError as e:
             logger.error(f"HTTP error fetching OpenWeather data: {e}")
-            return {}
+            # Generate fallback weather data
+            return self._generate_fallback_weather(coordinates, date)
         except Exception as e:
             logger.error(f"Error fetching OpenWeather data: {e}")
-            return {}
+            # Generate fallback weather data
+            return self._generate_fallback_weather(coordinates, date)
+    
+    def _generate_fallback_weather(
+        self,
+        coordinates: Tuple[float, float],
+        date: datetime
+    ) -> Dict[str, Any]:
+        """Generate reasonable fallback weather data based on location and date when APIs fail"""
+        import random
+        
+        lat, lng = coordinates
+        
+        # Determine season based on latitude and month
+        month = date.month
+        is_northern = lat > 0
+        
+        # Determine season
+        if is_northern:
+            is_summer = month in [6, 7, 8]
+            is_winter = month in [12, 1, 2]
+        else:
+            is_summer = month in [12, 1, 2]
+            is_winter = month in [6, 7, 8]
+        
+        # Base temperature on latitude and season
+        abs_lat = abs(lat)
+        if abs_lat < 23.5:  # Tropical
+            base_temp = 28 if is_summer else 25
+        elif abs_lat < 45:  # Temperate
+            base_temp = 25 if is_summer else 10
+        else:  # Cold
+            base_temp = 15 if is_summer else -5
+        
+        # Add some variation
+        temp = base_temp + random.randint(-3, 3)
+        feels_like = temp + random.randint(-2, 2)
+        
+        # Determine weather condition
+        conditions = ["clear", "partly cloudy", "cloudy", "rain"]
+        weights = [0.4, 0.3, 0.2, 0.1] if not is_winter else [0.3, 0.3, 0.3, 0.1]
+        condition = random.choices(conditions, weights=weights)[0]
+        
+        # Set weather parameters based on condition
+        if condition == "clear":
+            humidity = random.randint(40, 60)
+            clouds = random.randint(0, 20)
+            rain = 0
+            description = "Clear sky"
+        elif condition == "partly cloudy":
+            humidity = random.randint(50, 70)
+            clouds = random.randint(20, 60)
+            rain = 0
+            description = "Partly cloudy"
+        elif condition == "cloudy":
+            humidity = random.randint(60, 80)
+            clouds = random.randint(60, 90)
+            rain = 0
+            description = "Overcast clouds"
+        else:  # rain
+            humidity = random.randint(70, 90)
+            clouds = random.randint(80, 100)
+            rain = random.uniform(0.5, 3.0)
+            description = "Light rain"
+        
+        wind_speed = random.uniform(5, 15)
+        
+        logger.info(f"Generated fallback weather for ({lat}, {lng}) on {date.date()}: {temp}°C, {condition}")
+        
+        return {
+            "condition": condition,
+            "description": description,
+            "temperature": round(temp, 1),
+            "feels_like": round(feels_like, 1),
+            "humidity": humidity,
+            "wind_speed": round(wind_speed, 1),
+            "clouds": clouds,
+            "rain": round(rain, 2),
+            "date": date.isoformat(),
+            "location_coords": {"lat": lat, "lng": lng},
+            "is_fallback": True
+        }
     
     async def _fetch_weather_forecast_for_period(
         self,
@@ -522,7 +609,12 @@ class SmartAdjustmentsService:
             return None
         
         if self.weather_api_type == "google":
-            return await self._fetch_google_weather_forecast_for_period(coordinates, start_date, end_date)
+            result = await self._fetch_google_weather_forecast_for_period(coordinates, start_date, end_date)
+            # If Google Weather fails, fall back to OpenWeather
+            if not result and settings.openweather_api_key:
+                logger.warning("Google Weather API forecast failed, falling back to OpenWeather")
+                return await self._fetch_openweather_forecast_for_period(coordinates, start_date, end_date)
+            return result
         else:
             return await self._fetch_openweather_forecast_for_period(coordinates, start_date, end_date)
     

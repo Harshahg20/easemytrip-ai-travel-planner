@@ -1,5 +1,7 @@
 import googlemaps
+import httpx
 from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime, timedelta
 import logging
 from ..core.config import settings
 
@@ -203,6 +205,207 @@ class GoogleMapsService:
             place_type="tourist_attraction"
         )
     
+    async def get_current_weather(self, location: Tuple[float, float]) -> Dict[str, Any]:
+        """Get current weather conditions using Google Weather API"""
+        if not settings.google_maps_api_key or settings.google_maps_api_key == "your_google_maps_api_key_here":
+            logger.warning("Google Maps API key not configured for weather")
+            return self._get_fallback_weather()
+        
+        try:
+            lat, lng = location
+            url = "https://weather.googleapis.com/v1/currentConditions:lookup"
+            
+            params = {
+                "key": settings.google_maps_api_key,
+                "location.latitude": lat,
+                "location.longitude": lng
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                return self._format_current_weather(data)
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error fetching weather: {e.response.status_code} - {e.response.text}")
+            return self._get_fallback_weather()
+        except Exception as e:
+            logger.error(f"Error fetching current weather: {e}")
+            return self._get_fallback_weather()
+    
+    async def get_weather_forecast(self, location: Tuple[float, float], days: int = 5) -> Dict[str, Any]:
+        """Get daily weather forecast using Google Weather API (up to 10 days)"""
+        if not settings.google_maps_api_key or settings.google_maps_api_key == "your_google_maps_api_key_here":
+            logger.warning("Google Maps API key not configured for weather")
+            return self._get_fallback_forecast()
+        
+        try:
+            lat, lng = location
+            url = "https://weather.googleapis.com/v1/forecast:lookup"
+            
+            # Limit to 10 days as per API documentation
+            days = min(days, 10)
+            
+            params = {
+                "key": settings.google_maps_api_key,
+                "location.latitude": lat,
+                "location.longitude": lng,
+                "days": days
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                return self._format_forecast_weather(data)
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error fetching forecast: {e.response.status_code} - {e.response.text}")
+            return self._get_fallback_forecast()
+        except Exception as e:
+            logger.error(f"Error fetching weather forecast: {e}")
+            return self._get_fallback_forecast()
+    
+    async def get_hourly_weather(self, location: Tuple[float, float], hours: int = 24) -> Dict[str, Any]:
+        """Get hourly weather forecast using Google Weather API (up to 240 hours)"""
+        if not settings.google_maps_api_key or settings.google_maps_api_key == "your_google_maps_api_key_here":
+            logger.warning("Google Maps API key not configured for weather")
+            return self._get_fallback_hourly()
+        
+        try:
+            lat, lng = location
+            url = "https://weather.googleapis.com/v1/hourlyForecast:lookup"
+            
+            # Limit to 240 hours as per API documentation
+            hours = min(hours, 240)
+            
+            params = {
+                "key": settings.google_maps_api_key,
+                "location.latitude": lat,
+                "location.longitude": lng,
+                "hours": hours
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                return self._format_hourly_weather(data)
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error fetching hourly forecast: {e.response.status_code} - {e.response.text}")
+            return self._get_fallback_hourly()
+        except Exception as e:
+            logger.error(f"Error fetching hourly weather: {e}")
+            return self._get_fallback_hourly()
+    
+    def _format_current_weather(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Format Google Weather API current conditions response"""
+        try:
+            # Google Weather API structure
+            current = data.get('currentConditions', {})
+            temperature = current.get('temperature', {})
+            wind = current.get('wind', {})
+            humidity = current.get('humidity', {})
+            
+            return {
+                "type": "current",
+                "timestamp": datetime.now().isoformat(),
+                "temperature": {
+                    "value": temperature.get('value', 0),
+                    "unit": temperature.get('unit', 'celsius')
+                },
+                "condition": current.get('weatherCondition', 'Unknown'),
+                "description": current.get('weatherDescription', ''),
+                "icon_code": current.get('weatherIconCode', ''),
+                "humidity": humidity.get('value', 0),
+                "wind": {
+                    "speed": wind.get('speed', {}).get('value', 0),
+                    "direction": wind.get('direction', {}).get('degrees', 0),
+                    "unit": wind.get('speed', {}).get('unit', 'km/h')
+                },
+                "pressure": current.get('atmosphericPressure', {}).get('value', 0),
+                "visibility": current.get('visibility', {}).get('value', 0),
+                "uv_index": current.get('uvIndex', {}).get('value', 0),
+                "cloud_cover": current.get('cloudCover', 0),
+                "precipitation": current.get('precipitation', {}).get('value', 0),
+                "feels_like": current.get('apparentTemperature', {}).get('value', temperature.get('value', 0))
+            }
+        except Exception as e:
+            logger.error(f"Error formatting current weather: {e}")
+            return self._get_fallback_weather()
+    
+    def _format_forecast_weather(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Format Google Weather API daily forecast response"""
+        try:
+            daily_forecasts = []
+            forecast_list = data.get('dailyForecasts', [])
+            
+            for day in forecast_list:
+                temp = day.get('temperature', {})
+                daily_forecasts.append({
+                    "date": day.get('date', ''),
+                    "temperature": {
+                        "high": temp.get('high', {}).get('value', 0),
+                        "low": temp.get('low', {}).get('value', 0),
+                        "unit": temp.get('unit', 'celsius')
+                    },
+                    "condition": day.get('weatherCondition', 'Unknown'),
+                    "description": day.get('weatherDescription', ''),
+                    "icon_code": day.get('weatherIconCode', ''),
+                    "precipitation_probability": day.get('precipitationProbability', 0),
+                    "precipitation_amount": day.get('precipitation', {}).get('value', 0),
+                    "humidity": day.get('humidity', {}).get('value', 0),
+                    "wind_speed": day.get('wind', {}).get('speed', {}).get('value', 0),
+                    "uv_index": day.get('uvIndex', {}).get('value', 0),
+                    "sunrise": day.get('sunrise', ''),
+                    "sunset": day.get('sunset', '')
+                })
+            
+            return {
+                "type": "forecast",
+                "forecasts": daily_forecasts
+            }
+        except Exception as e:
+            logger.error(f"Error formatting forecast weather: {e}")
+            return self._get_fallback_forecast()
+    
+    def _format_hourly_weather(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Format Google Weather API hourly forecast response"""
+        try:
+            hourly_forecasts = []
+            forecast_list = data.get('hourlyForecasts', [])
+            
+            for hour in forecast_list:
+                temp = hour.get('temperature', {})
+                hourly_forecasts.append({
+                    "time": hour.get('time', ''),
+                    "temperature": {
+                        "value": temp.get('value', 0),
+                        "unit": temp.get('unit', 'celsius')
+                    },
+                    "condition": hour.get('weatherCondition', 'Unknown'),
+                    "description": hour.get('weatherDescription', ''),
+                    "icon_code": hour.get('weatherIconCode', ''),
+                    "precipitation_probability": hour.get('precipitationProbability', 0),
+                    "precipitation_amount": hour.get('precipitation', {}).get('value', 0),
+                    "humidity": hour.get('humidity', {}).get('value', 0),
+                    "wind_speed": hour.get('wind', {}).get('speed', {}).get('value', 0),
+                    "feels_like": hour.get('apparentTemperature', {}).get('value', 0)
+                })
+            
+            return {
+                "type": "hourly",
+                "forecasts": hourly_forecasts
+            }
+        except Exception as e:
+            logger.error(f"Error formatting hourly weather: {e}")
+            return self._get_fallback_hourly()
+    
     def _format_place_details(self, place: Dict[str, Any]) -> Dict[str, Any]:
         """Format place details from Google Maps API"""
         geometry = place.get('geometry', {})
@@ -302,6 +505,88 @@ class GoogleMapsService:
             ],
             "overview_polyline": route.get('overview_polyline', {}).get('points'),
             "summary": route.get('summary', '')
+        }
+    
+    def _get_fallback_weather(self) -> Dict[str, Any]:
+        """Fallback weather data when API fails"""
+        return {
+            "type": "current",
+            "timestamp": datetime.now().isoformat(),
+            "temperature": {
+                "value": 25,
+                "unit": "celsius"
+            },
+            "condition": "Unknown",
+            "description": "Weather data unavailable",
+            "icon_code": "",
+            "humidity": 50,
+            "wind": {
+                "speed": 10,
+                "direction": 0,
+                "unit": "km/h"
+            },
+            "pressure": 1013,
+            "visibility": 10,
+            "uv_index": 5,
+            "cloud_cover": 0,
+            "precipitation": 0,
+            "feels_like": 25,
+            "error": "Weather API unavailable"
+        }
+    
+    def _get_fallback_forecast(self) -> Dict[str, Any]:
+        """Fallback forecast data when API fails"""
+        forecasts = []
+        for i in range(5):
+            date = datetime.now() + timedelta(days=i)
+            forecasts.append({
+                "date": date.strftime("%Y-%m-%d"),
+                "temperature": {
+                    "high": 28,
+                    "low": 18,
+                    "unit": "celsius"
+                },
+                "condition": "Unknown",
+                "description": "Forecast unavailable",
+                "icon_code": "",
+                "precipitation_probability": 0,
+                "precipitation_amount": 0,
+                "humidity": 50,
+                "wind_speed": 10,
+                "uv_index": 5,
+                "sunrise": "06:00",
+                "sunset": "18:00"
+            })
+        return {
+            "type": "forecast",
+            "forecasts": forecasts,
+            "error": "Weather API unavailable"
+        }
+    
+    def _get_fallback_hourly(self) -> Dict[str, Any]:
+        """Fallback hourly forecast data when API fails"""
+        forecasts = []
+        for i in range(24):
+            time = datetime.now() + timedelta(hours=i)
+            forecasts.append({
+                "time": time.isoformat(),
+                "temperature": {
+                    "value": 25,
+                    "unit": "celsius"
+                },
+                "condition": "Unknown",
+                "description": "Forecast unavailable",
+                "icon_code": "",
+                "precipitation_probability": 0,
+                "precipitation_amount": 0,
+                "humidity": 50,
+                "wind_speed": 10,
+                "feels_like": 25
+            })
+        return {
+            "type": "hourly",
+            "forecasts": forecasts,
+            "error": "Weather API unavailable"
         }
     
     def _get_fallback_place_details(self, place_id: str) -> Dict[str, Any]:

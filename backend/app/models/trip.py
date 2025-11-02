@@ -8,6 +8,7 @@ class Trip(Base):
     __tablename__ = "trips"
     
     id = Column(String(255), primary_key=True, index=True)
+    user_id = Column(String(255), ForeignKey("users.id"), nullable=False, index=True)
     destination = Column(String(255), nullable=False)
     start_date = Column(DateTime, nullable=False)
     end_date = Column(DateTime, nullable=False)
@@ -27,6 +28,9 @@ class Trip(Base):
     photos_base64 = Column(JSON, nullable=True)  # Cached base64-encoded photos for planned/booked trips
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    
+    # Relationship with user
+    user = relationship("User", back_populates="trips")
     
     # Relationships
     daily_itineraries = relationship("DailyItinerary", back_populates="trip", cascade="all, delete-orphan")

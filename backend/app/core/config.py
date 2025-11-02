@@ -11,10 +11,10 @@ class Settings(BaseSettings):
     debug: bool = False
     environment: str = "development"
     
-    # Database - Must be provided in .env file
-    database_url: str
+    # Database - Can be provided directly or constructed from components
+    database_url: Optional[str] = None
     
-    # Security - Must be provided in .env file
+    # Security - Must be provided (from .env or secrets)
     secret_key: str
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
@@ -42,6 +42,27 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001"
     
     @property
+    def resolved_database_url(self) -> str:
+        """Get database URL, constructing it from components if needed"""
+        # If DATABASE_URL is explicitly set, use it
+        if self.database_url:
+            return self.database_url
+        
+        # Try to construct from Cloud Run environment variables
+        db_user = os.getenv("DB_USER")
+        db_name = os.getenv("DB_NAME")
+        db_password = os.getenv("DB_PASSWORD")
+        cloud_sql_conn = os.getenv("CLOUD_SQL_CONNECTION_NAME")
+        
+        if all([db_user, db_name, db_password, cloud_sql_conn]):
+            return f"mysql+pymysql://{db_user}:{db_password}@/{db_name}?unix_socket=/cloudsql/{cloud_sql_conn}"
+        
+        # Fallback for development
+        raise ValueError(
+            "DATABASE_URL must be set, or provide DB_USER, DB_NAME, DB_PASSWORD, and CLOUD_SQL_CONNECTION_NAME environment variables"
+        )
+    
+    @property
     def allowed_origins_list(self) -> List[str]:
         """Convert comma-separated origins to list"""
         return [origin.strip() for origin in self.allowed_origins.split(",")]
@@ -67,12 +88,18 @@ class Settings(BaseSettings):
 # Create settings instance with error handling
 try:
     settings = Settings()
+    # Validate that we can resolve database URL (but don't fail if DATABASE_URL not set yet)
+    try:
+        _ = settings.resolved_database_url
+    except ValueError:
+        # Will be checked when database.py tries to use it
+        pass
 except Exception as e:
     print("❌ Error loading configuration:")
     print(f"   {str(e)}")
-    print("\n📝 Please ensure you have a .env file with the required variables:")
-    print("   - DATABASE_URL")
-    print("   - SECRET_KEY")
+    print("\n📝 Please ensure you have:")
+    print("   - SECRET_KEY (required)")
+    print("   - DATABASE_URL OR (DB_USER, DB_NAME, DB_PASSWORD, CLOUD_SQL_CONNECTION_NAME)")
     print("   - GOOGLE_AI_API_KEY (optional)")
     print("   - GOOGLE_MAPS_API_KEY (optional)")
     print("\n💡 Run 'python setup.py' to create a .env file from template")

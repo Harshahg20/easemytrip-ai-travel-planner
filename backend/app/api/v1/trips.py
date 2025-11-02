@@ -13,7 +13,9 @@ import hashlib
 logger = logging.getLogger(__name__)
 
 from ...core.database import get_db
+from ...core.auth import get_current_active_user, get_user_or_guest
 from ...models.trip import Trip, DailyItinerary, TripOption, TripContentCache
+from ...models.user import User
 from ...services.google_ai_service import google_ai_service
 from ...services.google_maps_service import google_maps_service
 from ...services.smart_adjustments_service import smart_adjustments_service
@@ -26,6 +28,7 @@ from ..schemas.trip import (
     TripOptionResponse, DailyItineraryResponse,
     TripOptionsGenerate, PlaceSearchRequest, PlaceSearchResponse
 )
+from .trips_protected import verify_trip_ownership
 
 router = APIRouter()
 
@@ -171,13 +174,18 @@ async def _precache_travel_and_transport(
 
 
 @router.post("/", response_model=TripResponse)
-async def create_trip(trip_data: TripCreate, db: Session = Depends(get_db)):
-    """Create a new trip"""
+async def create_trip(
+    trip_data: TripCreate,
+    current_user: User = Depends(get_user_or_guest),
+    db: Session = Depends(get_db)
+):
+    """Create a new trip (works with or without authentication)"""
     try:
         # Create trip record
         trip_id = str(uuid.uuid4())
         db_trip = Trip(
             id=trip_id,
+            user_id=current_user.id,
             destination=trip_data.destination,
             start_date=trip_data.start_date,
             end_date=trip_data.end_date,
@@ -1791,8 +1799,8 @@ async def get_booking_prices(trip_id: str, db: Session = Depends(get_db)):
                     'class': option.get('class', '')
                 })
         
-        # Total transportation cost
-        total_transportation_cost = flight_cost + car_rental_cost
+        # Total transportation cost (include all transport types)
+        total_transportation_cost = flight_cost + car_rental_cost + train_cost
         
         # Ensure we're within budget - adjust if needed
         travel_budget = total_budget * 0.45
@@ -1804,10 +1812,13 @@ async def get_booking_prices(trip_id: str, db: Session = Depends(get_db)):
             scale_factor = max_transportation_budget / total_transportation_cost
             flight_cost = int(flight_cost * scale_factor)
             car_rental_cost = int(car_rental_cost * scale_factor)
+            train_cost = int(train_cost * scale_factor)
             # Update options with scaled costs
             for opt in flight_options:
                 opt['cost'] = int(opt['cost'] * scale_factor)
             for opt in car_rental_options:
+                opt['cost'] = int(opt['cost'] * scale_factor)
+            for opt in train_options:
                 opt['cost'] = int(opt['cost'] * scale_factor)
         
         booking_prices_result = {
@@ -1826,10 +1837,10 @@ async def get_booking_prices(trip_id: str, db: Session = Depends(get_db)):
                 "options": train_options,
                 "count": len(train_options)
             },
-            "total_transportation_cost": flight_cost + car_rental_cost,
+            "total_transportation_cost": total_transportation_cost,
             "budget_allocated": max_transportation_budget,
-            "budget_remaining": max_transportation_budget - (flight_cost + car_rental_cost),
-            "within_budget": (flight_cost + car_rental_cost) <= max_transportation_budget
+            "budget_remaining": max_transportation_budget - total_transportation_cost,
+            "within_budget": total_transportation_cost <= max_transportation_budget
         }
         
         # Store original content in cache
@@ -2127,23 +2138,16 @@ async def get_trip_weather(
                 )
                 cached_weather_forecast = weather_forecast_data
             else:
-                api_name = "Google Weather API" if settings.google_maps_api_key else "OpenWeatherMap API"
-                logger.warning(f"Failed to fetch weather forecast for {trip.destination} - API returned None")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to fetch weather data for destination: {trip.destination}. Please check {api_name} key and connectivity."
-                )
+                logger.warning(f"Failed to fetch weather forecast for {trip.destination} - will fetch day by day")
+                # Don't raise error, instead we'll fetch day by day below
+                cached_weather_forecast = None
         
         # Process all weather data for the trip period
-        forecast_by_date = cached_weather_forecast.get("forecast_by_date", {})
+        forecast_by_date = cached_weather_forecast.get("forecast_by_date", {}) if cached_weather_forecast else {}
         logger.info(f"Processing weather data. Found {len(forecast_by_date)} dates in forecast cache")
         
         if not forecast_by_date:
-            logger.warning("No weather forecast data found in cache. This may indicate an issue with the API response.")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"No weather forecast data available for {trip.destination}. Please try again later."
-            )
+            logger.warning("No weather forecast data found in cache. Will fetch day by day as fallback.")
         
         total_days = (trip.end_date - trip.start_date).days + 1
         
