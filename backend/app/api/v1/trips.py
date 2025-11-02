@@ -71,10 +71,31 @@ async def get_trip(trip_id: str, db: Session = Depends(get_db)):
         )
     
     # Get the selected trip option if any
+    # Note: is_selected is stored as a String ("True"/"False"), not boolean
     selected_option = db.query(TripOption).filter(
         TripOption.trip_id == trip_id,
-        TripOption.is_selected == True
+        TripOption.is_selected == "True"
     ).first()
+    
+    # Convert selected_option to dict if it exists
+    selected_option_dict = None
+    if selected_option:
+        # Convert is_selected from string ("True"/"False") to boolean
+        is_selected_bool = selected_option.is_selected == "True" if isinstance(selected_option.is_selected, str) else bool(selected_option.is_selected)
+        
+        selected_option_dict = {
+            "id": selected_option.id,
+            "trip_id": selected_option.trip_id,
+            "option_name": selected_option.option_name,
+            "theme": selected_option.theme,
+            "description": selected_option.description,
+            "total_cost": selected_option.total_cost,
+            "highlights": selected_option.highlights,
+            "is_selected": is_selected_bool,
+            "daily_itineraries": selected_option.daily_itineraries,
+            "created_at": selected_option.created_at,
+            "updated_at": selected_option.updated_at
+        }
     
     # Convert trip to dict and add selected option
     trip_dict = {
@@ -93,7 +114,7 @@ async def get_trip(trip_id: str, db: Session = Depends(get_db)):
         "status": trip.status,
         "created_at": trip.created_at,
         "updated_at": trip.updated_at,
-        "selected_option": selected_option
+        "selected_option": selected_option_dict
     }
     
     return trip_dict
@@ -542,8 +563,14 @@ async def select_trip_option(trip_id: str, option_id: str, db: Session = Depends
         )
     
     try:
-        # Mark this option as selected
-        option.is_selected = True
+        # Mark this option as selected (store as string "True")
+        option.is_selected = "True"
+        
+        # Unselect all other options for this trip
+        db.query(TripOption).filter(
+            TripOption.trip_id == trip_id,
+            TripOption.id != option_id
+        ).update({"is_selected": "False"})
         
         # Create daily itineraries from the selected option
         daily_itineraries_data = option.daily_itineraries or []
@@ -1608,3 +1635,388 @@ async def get_cache_stats(
     
     stats = await content_cache_service.get_cache_stats(trip_id=trip_id)
     return stats
+
+
+@router.get("/{trip_id}/day-weather/{day_number}", response_model=Dict[str, Any])
+async def get_day_weather(
+    trip_id: str,
+    day_number: int,
+    db: Session = Depends(get_db)
+):
+    """Get weather data for destination - fetches once for entire trip duration and caches it"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    # Validate day number
+    total_days = (trip.end_date - trip.start_date).days + 1
+    if day_number < 1 or day_number > total_days:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid day number. Must be between 1 and {total_days}"
+        )
+    
+    try:
+        # Calculate the date for this day
+        target_date = trip.start_date + timedelta(days=day_number - 1)
+        
+        # Get coordinates for destination
+        coordinates = await google_maps_service.geocode_address(trip.destination)
+        if not coordinates:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not geocode destination: {trip.destination}"
+            )
+        
+        # Check if we have cached weather for the entire trip
+        cache_key = "trip_weather_forecast"
+        cached_weather_forecast = await content_cache_service.get(trip_id, cache_key)
+        
+        # If not cached or cache expired, fetch weather for entire trip duration
+        if not cached_weather_forecast:
+            logger.info(f"Fetching weather forecast for {trip.destination} for entire trip duration")
+            
+            # Fetch weather forecast for the entire trip period
+            # OpenWeatherMap forecast API provides 5-day forecast, so we'll get forecast for start date
+            # and if needed, we can fetch additional forecasts
+            weather_forecast_data = await smart_adjustments_service._fetch_weather_forecast_for_period(
+                coordinates=coordinates,
+                start_date=trip.start_date,
+                end_date=trip.end_date
+            )
+            
+            # Cache the forecast for 6 hours (forecast data updates frequently)
+            if weather_forecast_data:
+                await content_cache_service.store(
+                    trip_id=trip_id,
+                    content_type=cache_key,
+                    content=weather_forecast_data,
+                    ttl_hours=6
+                )
+                cached_weather_forecast = weather_forecast_data
+            else:
+                logger.warning(f"Failed to fetch weather forecast for {trip.destination}")
+        
+        # Extract weather for the specific day
+        day_weather = None
+        if cached_weather_forecast and isinstance(cached_weather_forecast, dict):
+            # Find weather for the target date
+            forecast_by_date = cached_weather_forecast.get("forecast_by_date", {})
+            date_key = target_date.date().isoformat()
+            day_weather = forecast_by_date.get(date_key)
+            
+            # If exact date not found, use closest forecast
+            if not day_weather and forecast_by_date:
+                # Find closest date
+                target_date_obj = target_date.date()
+                closest_date = min(
+                    forecast_by_date.keys(),
+                    key=lambda x: abs((datetime.fromisoformat(x).date() - target_date_obj).days)
+                )
+                day_weather = forecast_by_date.get(closest_date)
+        
+        # Fallback: fetch weather directly for this day if cached data unavailable
+        if not day_weather:
+            logger.info(f"Fetching weather directly for {trip.destination} on {target_date.date()}")
+            day_weather = await smart_adjustments_service._fetch_weather_data(coordinates, target_date)
+        
+        # Format response with weather summary
+        weather_summary = None
+        if day_weather:
+            # Calculate temperature range (estimate based on current temp ±2-3°C)
+            temp = day_weather.get("temperature", 0)
+            feels_like = day_weather.get("feels_like", temp)
+            min_temp = min(temp, feels_like) - 2
+            max_temp = max(temp, feels_like) + 3
+            
+            # Format condition text
+            condition = day_weather.get("condition", "clear").title()
+            description = day_weather.get("description", "")
+            description_text = description.title() if description else ""
+            
+            # Create formatted weather summary
+            month_name = target_date.strftime("%B")
+            condition_text = f"Likely {condition}"
+            if description_text:
+                condition_text += f" - {description_text}"
+            condition_text += f", Typical For {month_name}."
+            
+            # Add additional context based on weather
+            if day_weather.get("rain", 0) > 0:
+                condition_text += " Potential For Rain."
+            if day_weather.get("wind_speed", 0) > 10:
+                condition_text += " Windy Conditions Expected."
+            elif day_weather.get("clouds", 0) > 50:
+                condition_text += " Cloudy Skies Possible."
+            
+            # Create recommendations
+            recommendations = []
+            if temp > 30:
+                recommendations.append("Stay hydrated and seek shade during peak hours.")
+                recommendations.append("Pack light, breathable clothing. Sun protection is crucial.")
+            elif temp < 15:
+                recommendations.append("Dress in layers. Carry warm clothing.")
+            else:
+                recommendations.append("Pack light, breathable clothing. Sun protection recommended.")
+            
+            if day_weather.get("rain", 0) > 0:
+                recommendations.append("Carry an umbrella or rain gear.")
+            if day_weather.get("wind_speed", 0) > 10:
+                recommendations.append("Secure loose items. Wind-resistant clothing recommended.")
+            
+            weather_summary = {
+                "temperature_range": f"{int(min_temp)}-{int(max_temp)}°C (estimated)",
+                "condition": condition_text,
+                "recommendations": " ".join(recommendations),
+                "temperature": temp,
+                "condition_keyword": condition.lower(),
+                "description": description
+            }
+            
+            weather_data_list = [{
+                "coordinates": coordinates,
+                "place_name": trip.destination,
+                "location": trip.destination,
+                "weather_data": day_weather,
+                "weather_summary": weather_summary
+            }]
+        else:
+            weather_data_list = []
+            logger.warning(f"No weather data available for {trip.destination} on {target_date.date()}")
+        
+        return {
+            "trip_id": trip_id,
+            "day_number": day_number,
+            "date": target_date.isoformat(),
+            "weather_updates": weather_data_list,
+            "count": len(weather_data_list),
+            "weather_summary": weather_summary  # Add summary at top level too
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching day weather: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching day weather: {str(e)}"
+        )
+
+
+@router.get("/{trip_id}/day-traffic/{day_number}", response_model=Dict[str, Any])
+async def get_day_traffic(
+    trip_id: str,
+    day_number: int,
+    db: Session = Depends(get_db)
+):
+    """Get traffic/routing data between places in a specific day's itinerary"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    # Validate day number
+    total_days = (trip.end_date - trip.start_date).days + 1
+    if day_number < 1 or day_number > total_days:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid day number. Must be between 1 and {total_days}"
+        )
+    
+    try:
+        # Calculate the date for this day
+        target_date = trip.start_date + timedelta(days=day_number - 1)
+        
+        # Get the itinerary for this day
+        daily_itinerary = db.query(DailyItinerary).filter(
+            DailyItinerary.trip_id == trip_id,
+            DailyItinerary.day_number == day_number
+        ).first()
+        
+        # Try to get from cache first
+        content_type = f"daily_itinerary_{day_number}"
+        cached_itinerary = await content_cache_service.get(trip_id, content_type)
+        
+        if not cached_itinerary and not daily_itinerary:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Daily itinerary not found for this day"
+            )
+        
+        # Use cached itinerary if available, otherwise use DB itinerary
+        day_data = cached_itinerary if cached_itinerary else {
+            "places": daily_itinerary.activities or [],
+            "activities": daily_itinerary.activities or [],
+            "meals": daily_itinerary.meals or []
+        }
+        
+        # Get coordinates for destination (fallback)
+        coordinates = await google_maps_service.geocode_address(trip.destination)
+        
+        # Prepare current itinerary structure
+        current_itinerary = {
+            "places": day_data.get("places", []),
+            "activities": day_data.get("activities", []),
+            "meals": day_data.get("meals", [])
+        }
+        
+        # Fetch traffic data for routes between places
+        traffic_data = await smart_adjustments_service._fetch_traffic_data(
+            coordinates=coordinates,
+            current_itinerary=current_itinerary,
+            date=target_date
+        )
+        
+        return {
+            "trip_id": trip_id,
+            "day_number": day_number,
+            "date": target_date.isoformat(),
+            "traffic_data": traffic_data,
+            "has_traffic": traffic_data.get("has_delays", False),
+            "segments_count": len(traffic_data.get("segments", []))
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching day traffic: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching day traffic: {str(e)}"
+        )
+
+
+@router.get("/{trip_id}/packing/{day_number}", response_model=Dict[str, Any])
+async def get_day_packing(
+    trip_id: str,
+    day_number: int,
+    db: Session = Depends(get_db)
+):
+    """Get packing suggestions for a specific day based on weather, activities, and temple dress codes"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    # Validate day number
+    total_days = (trip.end_date - trip.start_date).days + 1
+    if day_number < 1 or day_number > total_days:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid day number. Must be between 1 and {total_days}"
+        )
+    
+    try:
+        # Calculate the date for this day
+        target_date = trip.start_date + timedelta(days=day_number - 1)
+        
+        # Get the itinerary for this day (optional - can work without it)
+        daily_itinerary = db.query(DailyItinerary).filter(
+            DailyItinerary.trip_id == trip_id,
+            DailyItinerary.day_number == day_number
+        ).first()
+        
+        # Try to get from cache first
+        content_type = f"daily_itinerary_{day_number}"
+        cached_itinerary = await content_cache_service.get(trip_id, content_type)
+        
+        # Use cached itinerary if available, otherwise use DB itinerary, or empty if neither exists
+        if cached_itinerary:
+            day_data = cached_itinerary
+        elif daily_itinerary:
+            day_data = {
+                "places": daily_itinerary.activities or [],
+                "activities": daily_itinerary.activities or [],
+                "meals": daily_itinerary.meals or []
+            }
+        else:
+            # No itinerary found - use empty data, we'll still generate packing based on destination and weather
+            logger.info(f"No daily itinerary found for day {day_number}, generating packing based on destination and weather")
+            day_data = {
+                "places": [],
+                "activities": [],
+                "meals": []
+            }
+        
+        # Get activities
+        activities = day_data.get("activities", [])
+        
+        # Get weather data for this day (using the same cached weather approach as weather endpoint)
+        coordinates = await google_maps_service.geocode_address(trip.destination)
+        if not coordinates:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not geocode destination: {trip.destination}"
+            )
+        
+        # Use the same weather fetching logic as day-weather endpoint
+        cache_key = "trip_weather_forecast"
+        cached_weather_forecast = await content_cache_service.get(trip_id, cache_key)
+        
+        # Get weather for this specific day
+        day_weather = None
+        if cached_weather_forecast and isinstance(cached_weather_forecast, dict):
+            forecast_by_date = cached_weather_forecast.get("forecast_by_date", {})
+            date_key = target_date.date().isoformat()
+            day_weather = forecast_by_date.get(date_key)
+            
+            # If exact date not found, use closest forecast
+            if not day_weather and forecast_by_date:
+                target_date_obj = target_date.date()
+                closest_date = min(
+                    forecast_by_date.keys(),
+                    key=lambda x: abs((datetime.fromisoformat(x).date() - target_date_obj).days)
+                )
+                day_weather = forecast_by_date.get(closest_date)
+        
+        # Fallback: fetch weather directly for this day if cached data unavailable
+        if not day_weather:
+            day_weather = await smart_adjustments_service._fetch_weather_data(coordinates, target_date)
+        
+        # Format weather data for packing API
+        weather_data_list = []
+        if day_weather:
+            weather_data_list = [{
+                "coordinates": coordinates,
+                "place_name": trip.destination,
+                "location": trip.destination,
+                "weather_data": day_weather
+            }]
+        
+        # Prepare trip data for packing generation
+        trip_data = {
+            "destination": trip.destination,
+            "date": target_date.isoformat(),
+            "travelers": trip.travelers
+        }
+        
+        # Generate packing suggestions using AI
+        packing_suggestions = await google_ai_service.generate_packing_suggestions(
+            trip_data=trip_data,
+            day_number=day_number,
+            weather_data=weather_data_list,
+            activities=activities
+        )
+        
+        return {
+            "trip_id": trip_id,
+            "day_number": day_number,
+            "date": target_date.isoformat(),
+            "packing_suggestions": packing_suggestions
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching packing suggestions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching packing suggestions: {str(e)}"
+        )

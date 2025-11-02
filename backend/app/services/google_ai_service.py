@@ -2,6 +2,7 @@ import google.generativeai as genai
 from typing import Dict, List, Any, Optional
 import json
 import logging
+import re
 from ..core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -237,7 +238,7 @@ class GoogleAIService:
                             {{
                                 "time": "09:00",
                                 "activity": "Specific activity name",
-                                "location": "Real location in {destination}",
+                                "location": "Real location in {{destination}}",
                                 "duration": "2 hours",
                                 "cost": 1000,
                                 "description": "Detailed description"
@@ -654,7 +655,7 @@ class GoogleAIService:
                         "places": [
                             {{
                                 "place": "Specific attraction name",
-                                "location": "Real location in {destination}",
+                                "location": "Real location in {{destination}}",
                                 "description": "What to do/see here",
                                 "estimated_cost": 1000
                             }}
@@ -1054,10 +1055,21 @@ IMPORTANT ADJUSTMENTS NEEDED:
             "top_k": 40,
         }
         
-        response = self.model.generate_content(
-            prompt,
-            generation_config=generation_config
-        )
+        # Use response_mime_type for structured JSON output when available
+        try:
+            # Try using response_schema for structured output (Gemini 2.0+)
+            response = self.model.generate_content(
+                prompt,
+                generation_config=generation_config,
+                # Note: response_mime_type might not be available in all versions
+            )
+        except TypeError:
+            # Fallback for older API versions
+            response = self.model.generate_content(
+                prompt,
+                generation_config=generation_config
+            )
+        
         return response.text
     
     def _parse_trip_options_response(self, response: str) -> List[Dict[str, Any]]:
@@ -1155,6 +1167,37 @@ IMPORTANT ADJUSTMENTS NEEDED:
                 return json.loads(json_str)
         except Exception as e:
             logger.error(f"Error parsing recommendations response: {e}")
+        
+        return {}
+    
+    def _parse_json_response(self, response: str) -> Dict[str, Any]:
+        """Parse generic JSON response from AI (for transport/travel details)"""
+        try:
+            # Clean response - remove markdown code blocks if present
+            cleaned_response = response.strip()
+            if cleaned_response.startswith('```'):
+                # Remove code block markers
+                lines = cleaned_response.split('\n')
+                cleaned_response = '\n'.join([line for line in lines if not line.strip().startswith('```')])
+            
+            # Extract JSON from response - try dict first, then array
+            start_idx = cleaned_response.find('{')
+            end_idx = cleaned_response.rfind('}') + 1
+            if start_idx != -1 and end_idx != -1:
+                json_str = cleaned_response[start_idx:end_idx]
+                parsed_data = json.loads(json_str)
+                
+                # Validate that we got a dict
+                if isinstance(parsed_data, dict) and len(parsed_data) > 0:
+                    logger.info(f"Successfully parsed JSON response from Gemini")
+                    return parsed_data
+                else:
+                    logger.warning(f"Parsed data is empty or not a dict: {type(parsed_data)}")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {e}")
+            logger.error(f"Response preview: {response[:500]}")
+        except Exception as e:
+            logger.error(f"Error parsing JSON response: {e}")
         
         return {}
     
@@ -1884,6 +1927,334 @@ IMPORTANT ADJUSTMENTS NEEDED:
             "total_estimated_cost": travel_budget,
             "recommended_combination": "Mix based on preference",
             "tips": ["Book flights 2-3 months in advance", "Consider travel time vs cost"]
+        }
+
+
+    async def generate_packing_suggestions(
+        self, 
+        trip_data: Dict[str, Any], 
+        day_number: int,
+        weather_data: Optional[List[Dict[str, Any]]] = None,
+        activities: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate packing suggestions for a specific day based on:
+        - Weather conditions for that day
+        - Activities planned (outdoor, indoor, temples, etc.)
+        - Dress code requirements for temples or religious places
+        """
+        if not self.model:
+            logger.warning("Google AI model not available, using fallback packing suggestions")
+            return self._get_fallback_packing_suggestions(trip_data, day_number, weather_data, activities)
+        
+        try:
+            prompt = self._create_packing_prompt(trip_data, day_number, weather_data, activities)
+            response = await self._generate_content(prompt)
+            packing_data = self._parse_packing_response(response)
+            
+            if not packing_data:
+                return self._get_fallback_packing_suggestions(trip_data, day_number, weather_data, activities)
+            
+            return packing_data
+        except Exception as e:
+            logger.error(f"Error generating packing suggestions: {e}")
+            return self._get_fallback_packing_suggestions(trip_data, day_number, weather_data, activities)
+    
+    def _create_packing_prompt(
+        self, 
+        trip_data: Dict[str, Any], 
+        day_number: int,
+        weather_data: Optional[List[Dict[str, Any]]] = None,
+        activities: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """Create prompt for generating packing suggestions"""
+        destination = trip_data.get('destination', 'Unknown')
+        date = trip_data.get('date', '')
+        
+        # Extract weather information
+        weather_info = ""
+        if weather_data and len(weather_data) > 0:
+            weather_list = []
+            for w in weather_data:
+                w_data = w.get('weather_data', {})
+                place = w.get('place_name', 'location')
+                temp = w_data.get('temperature', 'N/A')
+                condition = w_data.get('condition', 'N/A')
+                description = w_data.get('description', '')
+                rain = w_data.get('rain', 0)
+                wind_speed = w_data.get('wind_speed', 0)
+                
+                weather_list.append(
+                    f"{place}: {temp}°C, {condition} ({description}), "
+                    f"{'Rain: ' + str(rain) + 'mm, ' if rain > 0 else ''}"
+                    f"Wind: {wind_speed} m/s"
+                )
+            weather_info = "\n".join(weather_list)
+        else:
+            weather_info = "Weather data not available"
+        
+        # Extract activities and check for temples
+        activities_info = ""
+        has_temples = False
+        activity_types = []
+        
+        if activities:
+            activity_list = []
+            for act in activities:
+                activity_name = act.get('activity', '') or act.get('name', '')
+                location = act.get('location', '')
+                category = act.get('category', '')
+                description = act.get('description', '')
+                
+                activity_list.append(f"- {activity_name} at {location} (Category: {category})")
+                
+                # Check if it's a temple or religious place
+                act_text = f"{activity_name} {location} {description}".lower()
+                if any(keyword in act_text for keyword in ['temple', 'mosque', 'church', 'gurudwara', 'monastery', 'shrine', 'religious', 'spiritual', 'darshan', 'puja', 'prayer']):
+                    has_temples = True
+                
+                if category:
+                    activity_types.append(category.lower())
+            activities_info = "\n".join(activity_list)
+        else:
+            activities_info = "No specific activities listed"
+        
+        # Build dress code section
+        dress_code_note = ""
+        if has_temples:
+            dress_code_note = """
+IMPORTANT DRESS CODE REQUIREMENTS FOR TEMPLES:
+- Modest clothing required (covered shoulders, knees, and midriff)
+- Remove footwear before entering
+- Avoid revealing or tight-fitting clothes
+- Traditional attire is appreciated (saree, kurta, salwar kameez for women; kurta or formal wear for men)
+- Carry a scarf/shawl for covering head if needed
+- Some temples may require specific dress codes - provide guidance
+"""
+        
+        prompt = f"""
+You are an expert travel packing consultant. Generate detailed packing suggestions for Day {day_number} of a trip to {destination}.
+
+DESTINATION: {destination}
+DATE: {date}
+DAY NUMBER: {day_number}
+
+WEATHER CONDITIONS FOR THIS DAY:
+{weather_info}
+
+PLANNED ACTIVITIES:
+{activities_info}
+
+{dress_code_note}
+
+Generate comprehensive packing suggestions that consider:
+1. Weather-appropriate clothing (temperature, rain, wind conditions)
+2. Activity-specific items (based on the activities planned)
+3. Temple/religious place dress code requirements (if any temples are included)
+4. Comfort items for the day's activities
+5. Essential accessories and personal care items
+
+Return ONLY valid JSON (no markdown, no code blocks, no explanations):
+{{
+    "day_number": {day_number},
+    "date": "{date}",
+    "destination": "{destination}",
+    "weather_summary": {{
+        "temperature_range": "e.g., 22-28°C",
+        "condition": "e.g., Sunny with occasional showers",
+        "recommendations": "Brief weather-based recommendations"
+    }},
+    "dress_code": {{
+        "has_temple_visit": {str(has_temples).lower()},
+        "requirements": ["List of dress code requirements if any"],
+        "suggestions": ["Specific clothing suggestions for dress code compliance"]
+    }},
+    "clothing": {{
+        "essential": ["List of essential clothing items"],
+        "weather_specific": ["Clothing items based on weather"],
+        "activity_specific": ["Clothing items based on activities"],
+        "temple_appropriate": ["Modest clothing for temple visits if applicable"]
+    }},
+    "footwear": ["List of appropriate footwear"],
+    "accessories": ["List of accessories needed"],
+    "personal_care": ["List of personal care items"],
+    "activity_specific_items": ["Items specific to planned activities"],
+    "important_notes": ["Important reminders or special considerations"]
+}}
+
+Be specific and practical. Consider the actual weather conditions and activities provided.
+
+IMPORTANT JSON FORMATTING RULES:
+- Every key must be a quoted string
+- Every string value must use double quotes (not single quotes)
+- Arrays must use square brackets [ ]
+- Objects must use curly braces {{ }}
+- Use commas to separate array elements and object key-value pairs
+- DO NOT include trailing commas
+- DO NOT add any text, explanations, or markdown formatting outside the JSON object
+- The response must start with {{ and end with }}
+"""
+        return prompt
+    
+    def _parse_packing_response(self, response: str) -> Optional[Dict[str, Any]]:
+        """Parse packing suggestions from AI response"""
+        try:
+            # Clean response - remove markdown code blocks if present
+            cleaned_response = response.strip()
+            if '```json' in cleaned_response:
+                # Extract content between ```json and ```
+                parts = cleaned_response.split('```json')
+                if len(parts) > 1:
+                    cleaned_response = parts[1].split('```')[0].strip()
+            elif cleaned_response.startswith('```'):
+                # Extract content between ``` and ```
+                parts = cleaned_response.split('```')
+                if len(parts) >= 3:
+                    # Take the content between first and second ```
+                    cleaned_response = parts[1].strip()
+                    # If there's more content after, remove it if it's just closing ```
+                    if len(parts) > 3 and parts[2].strip() == '':
+                        cleaned_response = parts[1].strip()
+            cleaned_response = cleaned_response.strip()
+            
+            # Extract JSON from response by finding first { and last }
+            start_idx = cleaned_response.find('{')
+            end_idx = cleaned_response.rfind('}') + 1
+            
+            if start_idx != -1 and end_idx > start_idx:
+                json_str = cleaned_response[start_idx:end_idx]
+                packing_data = json.loads(json_str)
+                
+                # Validate that we got a dict
+                if isinstance(packing_data, dict) and len(packing_data) > 0:
+                    logger.info("Successfully parsed packing response from Gemini")
+                    return packing_data
+                else:
+                    logger.warning(f"Parsed packing data is empty or not a dict: {type(packing_data)}")
+            else:
+                logger.warning("Could not find JSON object in response")
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error in packing response: {e}")
+            logger.error(f"Response preview (first 2000 chars): {response[:2000]}")
+            
+            # Try to extract and fix common JSON issues
+            try:
+                # Attempt to fix common issues
+                fixed_response = cleaned_response
+                
+                # 1. Remove trailing commas before } or ] (this must come first)
+                fixed_response = re.sub(r',(\s*[}\]])', r'\1', fixed_response)
+                
+                # 2. Fix missing commas between consecutive string values in arrays
+                # Pattern: "value1" "value2" should become "value1", "value2"
+                fixed_response = re.sub(r'("(?:[^"\\]|\\.)*")\s+"', r'\1, "', fixed_response)
+                
+                # 3. Fix missing commas after closing braces/brackets before new keys
+                # Pattern: } "key" or ] "key" should become }, "key" or ], "key"
+                # But avoid matching if there's already a comma
+                fixed_response = re.sub(r'([}\])\s+"', r'\1, "', fixed_response)
+                
+                # 4. Remove comments (JSON doesn't support comments but AI might add them)
+                fixed_response = re.sub(r'//.*?$', '', fixed_response, flags=re.MULTILINE)
+                fixed_response = re.sub(r'/\*.*?\*/', '', fixed_response, flags=re.DOTALL)
+                
+                # 5. Remove any control characters except newlines, tabs, and carriage returns
+                fixed_response = ''.join(char for char in fixed_response if ord(char) >= 32 or char in '\n\r\t')
+                
+                # Re-extract JSON boundaries after fixing
+                fix_start_idx = fixed_response.find('{')
+                fix_end_idx = fixed_response.rfind('}') + 1
+                
+                if fix_start_idx != -1 and fix_end_idx > fix_start_idx:
+                    json_str = fixed_response[fix_start_idx:fix_end_idx]
+                    logger.debug(f"Attempting to parse fixed JSON (length: {len(json_str)})")
+                    packing_data = json.loads(json_str)
+                    if isinstance(packing_data, dict):
+                        logger.info("Successfully parsed packing response after fixing JSON")
+                        return packing_data
+                    else:
+                        logger.warning(f"Fixed JSON is not a dict, got {type(packing_data)}")
+                else:
+                    logger.warning("Could not find JSON boundaries in fixed response")
+            except json.JSONDecodeError as fix_error:
+                logger.error(f"JSON still invalid after fixing attempts: {fix_error}")
+                logger.debug(f"Fixed response preview (first 1500 chars): {fixed_response[:1500] if 'fixed_response' in locals() else 'N/A'}")
+            except Exception as fix_error:
+                logger.error(f"Could not fix JSON: {fix_error}")
+        except Exception as e:
+            logger.error(f"Error parsing packing response: {e}")
+            logger.debug(f"Response preview: {response[:1000]}")
+        
+        return None
+    
+    def _get_fallback_packing_suggestions(
+        self, 
+        trip_data: Dict[str, Any], 
+        day_number: int,
+        weather_data: Optional[List[Dict[str, Any]]] = None,
+        activities: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """Fallback packing suggestions if AI generation fails"""
+        destination = trip_data.get('destination', 'Unknown')
+        date = trip_data.get('date', '')
+        
+        # Basic weather detection
+        temp_range = "20-30°C"
+        condition = "Moderate"
+        if weather_data and len(weather_data) > 0:
+            temps = [w.get('weather_data', {}).get('temperature', 25) for w in weather_data if w.get('weather_data', {}).get('temperature')]
+            if temps:
+                min_temp = min(temps)
+                max_temp = max(temps)
+                temp_range = f"{int(min_temp)}-{int(max_temp)}°C"
+                
+                # Check for rain
+                has_rain = any(w.get('weather_data', {}).get('rain', 0) > 0 for w in weather_data)
+                if has_rain:
+                    condition = "Rainy"
+                elif max_temp > 30:
+                    condition = "Hot"
+                elif min_temp < 15:
+                    condition = "Cold"
+        
+        # Check for temples
+        has_temples = False
+        if activities:
+            for act in activities:
+                act_text = f"{act.get('activity', '')} {act.get('location', '')}".lower()
+                if any(keyword in act_text for keyword in ['temple', 'mosque', 'church', 'gurudwara', 'monastery', 'shrine', 'religious']):
+                    has_temples = True
+                    break
+        
+        return {
+            "day_number": day_number,
+            "date": date,
+            "destination": destination,
+            "weather_summary": {
+                "temperature_range": temp_range,
+                "condition": condition,
+                "recommendations": f"Pack accordingly for {condition.lower()} weather"
+            },
+            "dress_code": {
+                "has_temple_visit": has_temples,
+                "requirements": ["Modest clothing required"] if has_temples else [],
+                "suggestions": ["Covered shoulders and knees"] if has_temples else []
+            },
+            "clothing": {
+                "essential": ["Comfortable day wear", "Extra change of clothes"],
+                "weather_specific": ["Umbrella" if condition == "Rainy" else "Sunglasses"],
+                "activity_specific": ["Comfortable walking shoes"],
+                "temple_appropriate": ["Modest attire (covered shoulders and knees)"] if has_temples else []
+            },
+            "footwear": ["Comfortable walking shoes", "Flip-flops for temple visits" if has_temples else ""],
+            "accessories": ["Sunglasses", "Hat/Cap", "Water bottle"],
+            "personal_care": ["Sunscreen", "Hand sanitizer", "Tissues"],
+            "activity_specific_items": ["Camera", "Phone charger"],
+            "important_notes": [
+                "Check weather forecast before heading out",
+                "Dress respectfully for temple visits" if has_temples else "Wear comfortable shoes for walking"
+            ]
         }
 
 

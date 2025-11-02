@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Button } from "../ui/button";
+import { Badge } from "../ui/badge";
 import {
   CloudSun,
   Clock,
@@ -8,6 +9,10 @@ import {
   ArrowRight,
   AlertCircle,
   Loader2,
+  MapPin,
+  Droplets,
+  Wind,
+  Thermometer,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { tripService } from "../../services/api";
@@ -81,10 +86,20 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
   const [adjustments, setAdjustments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [adjusting, setAdjusting] = useState({});
+  
+  // Separate state for weather and traffic
+  const [weatherUpdates, setWeatherUpdates] = useState([]);
+  const [trafficUpdates, setTrafficUpdates] = useState(null);
+  const [loadingWeather, setLoadingWeather] = useState(false);
+  const [loadingTraffic, setLoadingTraffic] = useState(false);
+  const [errorWeather, setErrorWeather] = useState(null);
+  const [errorTraffic, setErrorTraffic] = useState(null);
 
   useEffect(() => {
     if (trip?.id) {
       fetchSmartAdjustments(trip.id, selectedDay);
+      fetchWeatherUpdates(trip.id, selectedDay);
+      fetchTrafficUpdates(trip.id, selectedDay);
     }
   }, [trip?.id, selectedDay]);
 
@@ -99,6 +114,43 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
       setAdjustments([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchWeatherUpdates = async (tripId, dayNumber) => {
+    setLoadingWeather(true);
+    setErrorWeather(null);
+    try {
+      const data = await tripService.getDayWeather(tripId, dayNumber);
+      console.log("Weather API response:", data);
+      const updates = data.weather_updates || [];
+      console.log(`Received ${updates.length} weather updates for day ${dayNumber}`);
+      if (updates.length === 0) {
+        console.warn("No weather updates in response. Response structure:", data);
+      }
+      setWeatherUpdates(updates);
+    } catch (error) {
+      console.error("Error fetching weather updates:", error);
+      console.error("Error details:", error.response?.data || error.message);
+      setErrorWeather("Failed to load weather data");
+      setWeatherUpdates([]);
+    } finally {
+      setLoadingWeather(false);
+    }
+  };
+
+  const fetchTrafficUpdates = async (tripId, dayNumber) => {
+    setLoadingTraffic(true);
+    setErrorTraffic(null);
+    try {
+      const data = await tripService.getDayTraffic(tripId, dayNumber);
+      setTrafficUpdates(data.traffic_data || null);
+    } catch (error) {
+      console.error("Error fetching traffic updates:", error);
+      setErrorTraffic("Failed to load traffic data");
+      setTrafficUpdates(null);
+    } finally {
+      setLoadingTraffic(false);
     }
   };
 
@@ -143,7 +195,10 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
     }
   };
 
-  if (loading) {
+  // Loading state for all data
+  const isLoading = loading || loadingWeather || loadingTraffic;
+  
+  if (isLoading && !weatherUpdates.length && !trafficUpdates && !adjustments.length) {
     return (
       <Card className="border-slate-200 shadow-sm bg-white">
         <CardHeader>
@@ -164,27 +219,37 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
     );
   }
 
-  if (!adjustments || adjustments.length === 0) {
-    return (
-      <Card className="border-slate-200 shadow-sm bg-white">
-        <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Sparkles className="w-5 h-5 text-amber-500" />
-          Real-Time Updates
-        </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-slate-600 mb-6">
-            Your trip is alive! We monitor conditions in real-time to suggest
-            smart adjustments, ensuring you have the best possible experience.
-          </p>
-          <div className="text-center py-8 text-sm text-slate-500">
-            No adjustments needed at this time. Your itinerary looks perfect!
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
+  // Helper function to format temperature
+  const formatTemperature = (temp) => {
+    if (typeof temp === "number") {
+      return `${Math.round(temp)}°C`;
+    }
+    return "N/A";
+  };
+
+  // Helper function to get weather icon based on condition
+  const getWeatherCondition = (condition) => {
+    const cond = condition?.toLowerCase() || "";
+    if (cond.includes("rain") || cond.includes("drizzle")) return { icon: Droplets, color: "blue", borderClass: "border-blue-300", textClass: "text-blue-600", label: "Rainy" };
+    if (cond.includes("cloud")) return { icon: CloudSun, color: "slate", borderClass: "border-slate-300", textClass: "text-slate-600", label: "Cloudy" };
+    if (cond.includes("clear") || cond.includes("sun")) return { icon: CloudSun, color: "amber", borderClass: "border-amber-300", textClass: "text-amber-600", label: "Sunny" };
+    return { icon: CloudSun, color: "slate", borderClass: "border-slate-300", textClass: "text-slate-600", label: condition || "Clear" };
+  };
+
+  // Helper function to get weather color classes for card styling
+  const getWeatherColor = (condition) => {
+    const cond = condition?.toLowerCase() || "";
+    if (cond.includes("rain") || cond.includes("drizzle")) {
+      return "text-blue-600 bg-blue-50 border-blue-200";
+    }
+    if (cond.includes("cloud")) {
+      return "text-slate-600 bg-slate-50 border-slate-200";
+    }
+    if (cond.includes("clear") || cond.includes("sun")) {
+      return "text-amber-600 bg-amber-50 border-amber-200";
+    }
+    return "text-slate-600 bg-slate-50 border-slate-200";
+  };
 
   return (
     <Card className="border-slate-200 shadow-sm bg-white">
@@ -194,74 +259,299 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
           Real-Time Updates
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-6">
         <p className="text-sm text-slate-600 mb-6">
-          Real-time updates: We monitor weather conditions, traffic congestion, route changes, 
-          and place availability to keep your itinerary optimized throughout your journey.
+          Real-time updates for your itinerary: Weather conditions at planned places, traffic and route information, 
+          and smart adjustment suggestions to optimize your journey.
         </p>
+        
+        {/* Weather Updates Section */}
         <div className="space-y-4">
-          {adjustments.map((adjustment, index) => {
-            const Icon = getIconForType(adjustment.type);
-            const color = getColorForType(
-              adjustment.type,
-              adjustment.severity || "medium"
-            );
-
-            return (
-              <motion.div
-                key={adjustment.id || index}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.5, delay: index * 0.1 }}
-              >
-                <Card className={`${getBgColor(color)}`}>
-                  <CardContent className="p-4 flex items-start gap-4">
-                    <div
-                      className={`mt-1 flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${getIconColor(
-                        color
-                      )} bg-white`}
-                    >
-                      <Icon className="w-5 h-5" />
-                    </div>
-                    <div className="flex-1">
-                      <h4 className="font-semibold text-slate-800 mb-1">
-                        {adjustment.title}
-                      </h4>
-                      <p className="text-sm text-slate-600 mb-3">
-                        {adjustment.description}
-                      </p>
-                      {adjustment.suggestions && adjustment.suggestions.length > 0 && (
-                        <ul className="text-xs text-slate-500 mb-3 list-disc list-inside">
-                          {adjustment.suggestions.slice(0, 2).map((suggestion, idx) => (
-                            <li key={idx}>{suggestion}</li>
-                          ))}
-                        </ul>
-                      )}
-                      <Button
-                        variant="link"
-                        className="p-0 h-auto text-blue-600 font-semibold"
-                        onClick={() => handleAdjustItinerary(adjustment)}
-                        disabled={adjusting[adjustment.id]}
-                      >
-                        {adjusting[adjustment.id] ? (
-                          <>
-                            <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-                            Adjusting...
-                          </>
-                        ) : (
-                          <>
-                            {adjustment.action || "Adjust Itinerary"}
-                            <ArrowRight className="w-4 h-4 ml-1" />
-                          </>
-                        )}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              </motion.div>
-            );
-          })}
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+              <CloudSun className="w-5 h-5 text-blue-500" />
+              Weather Updates
+            </h3>
+            {loadingWeather && (
+              <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+            )}
+          </div>
+          
+          {errorWeather ? (
+            <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">
+              {errorWeather}
+            </div>
+          ) : weatherUpdates.length > 0 ? (
+            <div className="space-y-3">
+              {weatherUpdates.map((weather, index) => {
+                const weatherInfo = weather.weather_data || {};
+                const weatherSummary = weather.weather_summary || {};
+                const condition = getWeatherCondition(
+                  weatherSummary.condition_keyword || weatherInfo.condition
+                );
+                const ConditionIcon = condition.icon;
+                
+                // Use formatted summary if available, otherwise fallback to raw data
+                const temperatureDisplay = weatherSummary.temperature_range || 
+                  formatTemperature(weatherInfo.temperature);
+                const conditionDisplay = weatherSummary.condition || 
+                  condition.label;
+                const recommendations = weatherSummary.recommendations || "";
+                
+                return (
+                  <motion.div
+                    key={index}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, delay: index * 0.1 }}
+                  >
+                    <Card className={`border ${getWeatherColor(weatherSummary.condition_keyword || weatherInfo.condition)}`}>
+                      <CardContent className="p-4">
+                        <div className="flex items-start gap-3">
+                          <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center border-2">
+                            <ConditionIcon className="w-5 h-5" />
+                          </div>
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              <h4 className="font-semibold text-slate-800">
+                                {weather.place_name || "Location"}
+                              </h4>
+                              {weather.location && weather.location !== weather.place_name && (
+                                <span className="text-xs text-slate-500 flex items-center gap-1">
+                                  <MapPin className="w-3 h-3" />
+                                  {weather.location}
+                                </span>
+                              )}
+                            </div>
+                            
+                            {/* Weather Summary Card - Similar to Packing List */}
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2 mb-1">
+                                <Badge variant="outline" className="text-sm font-semibold">
+                                  {temperatureDisplay}
+                                </Badge>
+                              </div>
+                              
+                              <div className="text-sm text-slate-700 mb-2">
+                                <p className="font-medium capitalize">
+                                  {conditionDisplay}
+                                </p>
+                              </div>
+                              
+                              {recommendations && (
+                                <div className="text-xs text-slate-600 bg-slate-50 p-2 rounded-md">
+                                  <p className="font-medium text-slate-700 mb-1">Advice:</p>
+                                  <p>{recommendations}</p>
+                                </div>
+                              )}
+                              
+                              {/* Additional details in smaller text */}
+                              <div className="flex flex-wrap gap-3 text-xs text-slate-500 mt-2 pt-2 border-t border-slate-200">
+                                {weatherInfo.humidity !== undefined && (
+                                  <span>Humidity: {weatherInfo.humidity}%</span>
+                                )}
+                                {weatherInfo.wind_speed > 0 && (
+                                  <span>Wind: {Math.round(weatherInfo.wind_speed)} m/s</span>
+                                )}
+                                {weatherInfo.rain > 0 && (
+                                  <span className="text-blue-700">
+                                    <Droplets className="w-3 h-3 inline mr-1" />
+                                    Rain: {weatherInfo.rain}mm
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </motion.div>
+                );
+              })}
+            </div>
+          ) : !loadingWeather ? (
+            <div className="text-center py-4 text-sm text-slate-500">
+              No weather data available for planned places in your itinerary
+            </div>
+          ) : null}
         </div>
+
+        {/* Traffic Updates Section */}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+              <Clock className="w-5 h-5 text-amber-500" />
+              Traffic & Route Updates
+            </h3>
+            {loadingTraffic && (
+              <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+            )}
+          </div>
+          
+          {errorTraffic ? (
+            <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">
+              {errorTraffic}
+            </div>
+          ) : trafficUpdates && trafficUpdates.segments && trafficUpdates.segments.length > 0 ? (
+            <div className="space-y-3">
+              {trafficUpdates.segments.map((segment, index) => {
+                const delayMinutes = Math.round((segment.traffic_delay_seconds || 0) / 60);
+                const hasDelay = delayMinutes > 0;
+                
+                return (
+                  <motion.div
+                    key={index}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, delay: index * 0.1 }}
+                  >
+                    <Card className={`border ${hasDelay ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
+                      <CardContent className="p-4">
+                        <div className="flex items-start gap-3">
+                          <div className={`w-10 h-10 rounded-full bg-white flex items-center justify-center ${hasDelay ? 'border-2 border-amber-300' : 'border border-slate-300'}`}>
+                            <Clock className={`w-5 h-5 ${hasDelay ? 'text-amber-600' : 'text-slate-600'}`} />
+                          </div>
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              <h4 className="font-semibold text-slate-800">
+                                {segment.origin} → {segment.destination}
+                              </h4>
+                              {hasDelay && (
+                                <Badge variant="outline" className="bg-amber-100 text-amber-700 border-amber-300">
+                                  +{delayMinutes} min delay
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-3 text-sm">
+                              <div>
+                                <span className="text-slate-600">Distance: </span>
+                                <span className="font-medium text-slate-800">{segment.distance || "N/A"}</span>
+                              </div>
+                              <div>
+                                <span className="text-slate-600">Duration: </span>
+                                <span className={`font-medium ${hasDelay ? 'text-amber-700' : 'text-slate-800'}`}>
+                                  {segment.duration_in_traffic || segment.duration || "N/A"}
+                                </span>
+                                {segment.duration_in_traffic && segment.duration && segment.duration !== segment.duration_in_traffic && (
+                                  <span className="text-xs text-slate-500 ml-1">
+                                    (normal: {segment.duration})
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {segment.route_summary && (
+                              <div className="mt-2 text-xs text-slate-500">
+                                Route: {segment.route_summary}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </motion.div>
+                );
+              })}
+            </div>
+          ) : !loadingTraffic ? (
+            <div className="text-center py-4 text-sm text-slate-500">
+              No traffic route data available for this day
+            </div>
+          ) : null}
+        </div>
+
+        {/* Smart Adjustments Section - Only show if adjustments are needed */}
+        {adjustments && adjustments.length > 0 ? (
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-amber-500" />
+              Smart Adjustments
+            </h3>
+            <div className="space-y-4">
+              {adjustments.map((adjustment, index) => {
+                const Icon = getIconForType(adjustment.type);
+                const color = getColorForType(
+                  adjustment.type,
+                  adjustment.severity || "medium"
+                );
+
+                return (
+                  <motion.div
+                    key={adjustment.id || index}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.5, delay: index * 0.1 }}
+                  >
+                    <Card className={`${getBgColor(color)}`}>
+                      <CardContent className="p-4 flex items-start gap-4">
+                        <div
+                          className={`mt-1 flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${getIconColor(
+                            color
+                          )} bg-white`}
+                        >
+                          <Icon className="w-5 h-5" />
+                        </div>
+                        <div className="flex-1">
+                          <h4 className="font-semibold text-slate-800 mb-1">
+                            {adjustment.title}
+                          </h4>
+                          <p className="text-sm text-slate-600 mb-3">
+                            {adjustment.description}
+                          </p>
+                          {adjustment.suggestions && adjustment.suggestions.length > 0 && (
+                            <ul className="text-xs text-slate-500 mb-3 list-disc list-inside">
+                              {adjustment.suggestions.slice(0, 2).map((suggestion, idx) => (
+                                <li key={idx}>{suggestion}</li>
+                              ))}
+                            </ul>
+                          )}
+                          <Button
+                            variant="link"
+                            className="p-0 h-auto text-blue-600 font-semibold"
+                            onClick={() => handleAdjustItinerary(adjustment)}
+                            disabled={adjusting[adjustment.id]}
+                          >
+                            {adjusting[adjustment.id] ? (
+                              <>
+                                <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                                Adjusting...
+                              </>
+                            ) : (
+                              <>
+                                {adjustment.action || "Adjust Itinerary"}
+                                <ArrowRight className="w-4 h-4 ml-1" />
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </motion.div>
+                );
+              })}
+            </div>
+          </div>
+        ) : !loading ? (
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-amber-500" />
+              Smart Adjustments
+            </h3>
+            <Card className="border-emerald-200 bg-emerald-50">
+              <CardContent className="p-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center border-2 border-emerald-300">
+                    <Sparkles className="w-5 h-5 text-emerald-600" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-emerald-900">
+                      No adjustments needed at this time. Your itinerary looks perfect!
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );

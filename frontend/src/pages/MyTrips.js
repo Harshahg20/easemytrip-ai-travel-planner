@@ -100,8 +100,8 @@ export default function MyTrips() {
   };
 
   const handleViewDetails = (trip) => {
-    // Check if trip has a selected option
-    if (trip.selected_option) {
+    // Check if trip has a selected option with an ID
+    if (trip.selected_option && trip.selected_option.id) {
       // Navigate to TripPlanner with both trip_id and option_id
       navigate(
         `/trip-planner?trip_id=${trip.id}&option_id=${trip.selected_option.id}`

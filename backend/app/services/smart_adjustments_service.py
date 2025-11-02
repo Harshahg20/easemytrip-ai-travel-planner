@@ -104,7 +104,10 @@ class SmartAdjustmentsService:
     ) -> List[Dict[str, Any]]:
         """Fetch weather data for each place/activity location in the itinerary"""
         if not self.weather_api_key:
-            logger.warning("OpenWeatherMap API key not configured")
+            logger.warning("OpenWeatherMap API key not configured - weather data will not be available")
+            # Still try fallback if no API key
+            if fallback_coordinates:
+                logger.info("Attempting to use fallback coordinates despite missing API key")
             return []
         
         if not current_itinerary:
@@ -128,6 +131,7 @@ class SmartAdjustmentsService:
             activities = current_itinerary.get("activities", []) or []
             
             # Process places and activities
+            logger.debug(f"Processing {len(places)} places and {len(activities)} activities for weather")
             for item in places + activities:
                 place_name = item.get("name") or item.get("activity") or item.get("place") or "Location"
                 location_str = item.get("location") or item.get("address") or item.get("name")
@@ -144,7 +148,10 @@ class SmartAdjustmentsService:
                 # If no coordinates, try to geocode
                 if not coords and location_str:
                     try:
+                        logger.debug(f"Geocoding location: {location_str} for place: {place_name}")
                         coords = await google_maps_service.geocode_address(location_str)
+                        if coords:
+                            logger.debug(f"Successfully geocoded {location_str} to {coords}")
                     except Exception as e:
                         logger.warning(f"Could not geocode {location_str}: {e}")
                 
@@ -158,16 +165,23 @@ class SmartAdjustmentsService:
                             "place_name": place_name,
                             "location": location_str
                         }
+                        logger.debug(f"Added location to check: {place_name} at {coords}")
+            
+            logger.info(f"Found {len(locations_to_check)} unique locations to fetch weather for")
             
             # If no locations found, use fallback
             if not locations_to_check and fallback_coordinates:
+                logger.info(f"No locations found in itinerary, using fallback coordinates: {fallback_coordinates}")
                 weather_data = await self._fetch_weather_data(fallback_coordinates, date)
                 if weather_data:
+                    logger.info("Successfully fetched fallback weather data")
                     return [{
                         "coordinates": fallback_coordinates,
                         "place_name": "Destination",
                         "weather_data": weather_data
                     }]
+                else:
+                    logger.warning("Failed to fetch fallback weather data")
                 return []
             
             # Fetch weather for each unique location in parallel
@@ -191,8 +205,22 @@ class SmartAdjustmentsService:
             for result in weather_results:
                 if result and not isinstance(result, Exception):
                     valid_results.append(result)
+                    logger.debug(f"Successfully fetched weather for {result.get('place_name', 'unknown')}")
                 elif isinstance(result, Exception):
                     logger.error(f"Error fetching weather for location: {result}")
+            
+            logger.info(f"Successfully fetched weather for {len(valid_results)} out of {len(weather_tasks)} locations")
+            
+            # If no valid results but we have fallback, use it
+            if not valid_results and fallback_coordinates:
+                logger.info(f"No valid weather results, trying fallback coordinates: {fallback_coordinates}")
+                fallback_weather = await self._fetch_weather_data(fallback_coordinates, date)
+                if fallback_weather:
+                    return [{
+                        "coordinates": fallback_coordinates,
+                        "place_name": "Destination",
+                        "weather_data": fallback_weather
+                    }]
             
             return valid_results
             
@@ -286,6 +314,128 @@ class SmartAdjustmentsService:
         except Exception as e:
             logger.error(f"Error fetching weather data: {e}")
             return {}
+    
+    async def _fetch_weather_forecast_for_period(
+        self,
+        coordinates: Tuple[float, float],
+        start_date: datetime,
+        end_date: datetime
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch weather forecast for a date range and organize by date"""
+        if not self.weather_api_key:
+            logger.warning("OpenWeatherMap API key not configured")
+            return None
+        
+        try:
+            lat, lng = coordinates
+            url = "https://api.openweathermap.org/data/2.5/forecast"
+            
+            params = {
+                "lat": lat,
+                "lon": lng,
+                "appid": self.weather_api_key,
+                "units": "metric"
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                forecasts = data.get("list", [])
+                if not forecasts:
+                    logger.warning("No forecast data in API response")
+                    return None
+                
+                # Organize forecasts by date
+                forecast_by_date = {}
+                
+                # Current date for today's weather if needed
+                if start_date.date() == datetime.now().date():
+                    # Get current weather for today
+                    current_url = "https://api.openweathermap.org/data/2.5/weather"
+                    try:
+                        current_response = await client.get(current_url, params=params)
+                        if current_response.status_code == 200:
+                            current_data = current_response.json()
+                            today_key = datetime.now().date().isoformat()
+                            forecast_by_date[today_key] = {
+                                "condition": current_data.get("weather", [{}])[0].get("main", "").lower(),
+                                "description": current_data.get("weather", [{}])[0].get("description", ""),
+                                "temperature": current_data.get("main", {}).get("temp", 0),
+                                "feels_like": current_data.get("main", {}).get("feels_like", 0),
+                                "humidity": current_data.get("main", {}).get("humidity", 0),
+                                "wind_speed": current_data.get("wind", {}).get("speed", 0),
+                                "clouds": current_data.get("clouds", {}).get("all", 0),
+                                "rain": current_data.get("rain", {}).get("1h", 0) if "rain" in current_data else 0,
+                                "date": datetime.now().isoformat(),
+                                "location_coords": {"lat": lat, "lng": lng}
+                            }
+                    except Exception as e:
+                        logger.warning(f"Could not fetch current weather: {e}")
+                
+                # Process forecast list (3-hour intervals for up to 5 days)
+                for forecast in forecasts:
+                    forecast_time = datetime.fromtimestamp(forecast.get("dt", 0))
+                    forecast_date = forecast_time.date()
+                    date_key = forecast_date.isoformat()
+                    
+                    # Only include forecasts within trip period
+                    if start_date.date() <= forecast_date <= end_date.date():
+                        # If we already have a forecast for this date, use the one closest to noon
+                        if date_key not in forecast_by_date:
+                            forecast_by_date[date_key] = {
+                                "condition": forecast.get("weather", [{}])[0].get("main", "").lower(),
+                                "description": forecast.get("weather", [{}])[0].get("description", ""),
+                                "temperature": forecast.get("main", {}).get("temp", 0),
+                                "feels_like": forecast.get("main", {}).get("feels_like", 0),
+                                "humidity": forecast.get("main", {}).get("humidity", 0),
+                                "wind_speed": forecast.get("wind", {}).get("speed", 0),
+                                "clouds": forecast.get("clouds", {}).get("all", 0),
+                                "rain": forecast.get("rain", {}).get("3h", 0),
+                                "date": forecast_time.isoformat(),
+                                "forecast_time": forecast_time.isoformat(),
+                                "location_coords": {"lat": lat, "lng": lng},
+                                "hour": forecast_time.hour
+                            }
+                        else:
+                            # Use forecast closest to noon (12:00) for better representation
+                            existing_hour = forecast_by_date[date_key].get("hour", 12)
+                            current_hour = forecast_time.hour
+                            
+                            # If this forecast is closer to noon, use it
+                            if abs(current_hour - 12) < abs(existing_hour - 12):
+                                forecast_by_date[date_key] = {
+                                    "condition": forecast.get("weather", [{}])[0].get("main", "").lower(),
+                                    "description": forecast.get("weather", [{}])[0].get("description", ""),
+                                    "temperature": forecast.get("main", {}).get("temp", 0),
+                                    "feels_like": forecast.get("main", {}).get("feels_like", 0),
+                                    "humidity": forecast.get("main", {}).get("humidity", 0),
+                                    "wind_speed": forecast.get("wind", {}).get("speed", 0),
+                                    "clouds": forecast.get("clouds", {}).get("all", 0),
+                                    "rain": forecast.get("rain", {}).get("3h", 0),
+                                    "date": forecast_time.isoformat(),
+                                    "forecast_time": forecast_time.isoformat(),
+                                    "location_coords": {"lat": lat, "lng": lng},
+                                    "hour": forecast_time.hour
+                                }
+                
+                logger.info(f"Fetched weather forecast for {len(forecast_by_date)} dates")
+                
+                return {
+                    "destination_coordinates": coordinates,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "forecast_by_date": forecast_by_date,
+                    "cached_at": datetime.now().isoformat()
+                }
+                
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error fetching weather forecast: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching weather forecast: {e}")
+            return None
     
     async def _fetch_traffic_data(
         self,

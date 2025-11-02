@@ -50,6 +50,13 @@ export default function TripOptions() {
         return;
       }
 
+      // Check if a trip option is already selected
+      if (fetchedTrip.selected_option && fetchedTrip.selected_option.id) {
+        // Redirect to TripPlanner with the already selected option
+        navigate(`/trip-planner?trip_id=${tripId}&option_id=${fetchedTrip.selected_option.id}`);
+        return;
+      }
+
       // Fetch trip options from API
       const tripOptions = await tripService.getTripOptions(tripId);
 

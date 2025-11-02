@@ -129,7 +129,7 @@ class TrafficAgent:
     
     def _format_traffic_message(self, traffic_data: Dict[str, Any]) -> str:
         """Format traffic data into a user-friendly message"""
-语法 if not traffic_data or not traffic_data.get("segments"):
+        if not traffic_data or not traffic_data.get("segments"):
             return "No traffic data available"
         
         segments = traffic_data.get("segments", [])

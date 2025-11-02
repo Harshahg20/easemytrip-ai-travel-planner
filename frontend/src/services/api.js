@@ -473,6 +473,41 @@ export const tripService = {
       throw error;
     }
   },
+
+  // Get weather data for all places in a specific day's itinerary
+  getDayWeather: async (tripId, dayNumber) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/day-weather/${dayNumber}`);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching day weather:", error);
+      throw error;
+    }
+  },
+
+  // Get traffic/routing data between places in a specific day's itinerary
+  getDayTraffic: async (tripId, dayNumber) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/day-traffic/${dayNumber}`);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching day traffic:", error);
+      throw error;
+    }
+  },
+
+  // Get packing suggestions for a specific day based on weather, activities, and temple dress codes
+  getDayPacking: async (tripId, dayNumber) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/packing/${dayNumber}`, {
+        timeout: 120000, // 2 minutes timeout for AI generation
+      });
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching packing suggestions:", error);
+      throw error;
+    }
+  },
 };
 
 export default api;
