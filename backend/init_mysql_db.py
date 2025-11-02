@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent))
 
 from app.core.database import engine, Base
-from app.models.trip import Trip, DailyItinerary, TripOption
+from app.models.trip import Trip, DailyItinerary, TripOption, TranslationCache
 from app.core.config import settings
 
 def init_database():

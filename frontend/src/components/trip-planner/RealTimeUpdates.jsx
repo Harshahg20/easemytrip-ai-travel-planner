@@ -4,15 +4,12 @@ import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import {
   CloudSun,
-  Clock,
   Sparkles,
   ArrowRight,
   AlertCircle,
   Loader2,
   MapPin,
   Droplets,
-  Wind,
-  Thermometer,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { tripService } from "../../services/api";
@@ -21,10 +18,6 @@ const getIconForType = (type) => {
   switch (type) {
     case "weather":
       return CloudSun;
-    case "traffic":
-      return Clock;
-    case "route":
-      return ArrowRight;
     case "opportunity":
       return Sparkles;
     case "alert":
@@ -87,19 +80,15 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
   const [loading, setLoading] = useState(false);
   const [adjusting, setAdjusting] = useState({});
   
-  // Separate state for weather and traffic
+  // Weather state for entire trip
   const [weatherUpdates, setWeatherUpdates] = useState([]);
-  const [trafficUpdates, setTrafficUpdates] = useState(null);
   const [loadingWeather, setLoadingWeather] = useState(false);
-  const [loadingTraffic, setLoadingTraffic] = useState(false);
   const [errorWeather, setErrorWeather] = useState(null);
-  const [errorTraffic, setErrorTraffic] = useState(null);
 
   useEffect(() => {
     if (trip?.id) {
       fetchSmartAdjustments(trip.id, selectedDay);
-      fetchWeatherUpdates(trip.id, selectedDay);
-      fetchTrafficUpdates(trip.id, selectedDay);
+      fetchWeatherUpdates(trip.id);
     }
   }, [trip?.id, selectedDay]);
 
@@ -117,14 +106,14 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
     }
   };
 
-  const fetchWeatherUpdates = async (tripId, dayNumber) => {
+  const fetchWeatherUpdates = async (tripId) => {
     setLoadingWeather(true);
     setErrorWeather(null);
     try {
-      const data = await tripService.getDayWeather(tripId, dayNumber);
+      const data = await tripService.getTripWeather(tripId);
       console.log("Weather API response:", data);
       const updates = data.weather_updates || [];
-      console.log(`Received ${updates.length} weather updates for day ${dayNumber}`);
+      console.log(`Received ${updates.length} weather updates for trip`);
       if (updates.length === 0) {
         console.warn("No weather updates in response. Response structure:", data);
       }
@@ -136,21 +125,6 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
       setWeatherUpdates([]);
     } finally {
       setLoadingWeather(false);
-    }
-  };
-
-  const fetchTrafficUpdates = async (tripId, dayNumber) => {
-    setLoadingTraffic(true);
-    setErrorTraffic(null);
-    try {
-      const data = await tripService.getDayTraffic(tripId, dayNumber);
-      setTrafficUpdates(data.traffic_data || null);
-    } catch (error) {
-      console.error("Error fetching traffic updates:", error);
-      setErrorTraffic("Failed to load traffic data");
-      setTrafficUpdates(null);
-    } finally {
-      setLoadingTraffic(false);
     }
   };
 
@@ -196,9 +170,9 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
   };
 
   // Loading state for all data
-  const isLoading = loading || loadingWeather || loadingTraffic;
+  const isLoading = loading || loadingWeather;
   
-  if (isLoading && !weatherUpdates.length && !trafficUpdates && !adjustments.length) {
+  if (isLoading && !weatherUpdates.length && !adjustments.length) {
     return (
       <Card className="border-slate-200 shadow-sm bg-white">
         <CardHeader>
@@ -261,8 +235,7 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
       </CardHeader>
       <CardContent className="space-y-6">
         <p className="text-sm text-slate-600 mb-6">
-          Real-time updates for your itinerary: Weather conditions at planned places, traffic and route information, 
-          and smart adjustment suggestions to optimize your journey.
+          Real-time weather updates for your destination and smart adjustment suggestions to optimize your journey.
         </p>
         
         {/* Weather Updates Section */}
@@ -298,9 +271,17 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
                   condition.label;
                 const recommendations = weatherSummary.recommendations || "";
                 
+                // Format date for display
+                const weatherDate = weather.date ? new Date(weather.date) : null;
+                const dateDisplay = weatherDate ? weatherDate.toLocaleDateString('en-US', { 
+                  month: 'short', 
+                  day: 'numeric',
+                  year: weatherDate.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined
+                }) : '';
+                
                 return (
                   <motion.div
-                    key={index}
+                    key={weather.day_number || index}
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.3, delay: index * 0.1 }}
@@ -315,7 +296,13 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
                             <div className="flex items-center gap-2 mb-2">
                               <h4 className="font-semibold text-slate-800">
                                 {weather.place_name || "Location"}
+                                {weather.day_number && ` - Day ${weather.day_number}`}
                               </h4>
+                              {dateDisplay && (
+                                <Badge variant="outline" className="text-xs">
+                                  {dateDisplay}
+                                </Badge>
+                              )}
                               {weather.location && weather.location !== weather.place_name && (
                                 <span className="text-xs text-slate-500 flex items-center gap-1">
                                   <MapPin className="w-3 h-3" />
@@ -371,90 +358,7 @@ export default function RealTimeUpdates({ trip, selectedDay = 1 }) {
             </div>
           ) : !loadingWeather ? (
             <div className="text-center py-4 text-sm text-slate-500">
-              No weather data available for planned places in your itinerary
-            </div>
-          ) : null}
-        </div>
-
-        {/* Traffic Updates Section */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
-              <Clock className="w-5 h-5 text-amber-500" />
-              Traffic & Route Updates
-            </h3>
-            {loadingTraffic && (
-              <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
-            )}
-          </div>
-          
-          {errorTraffic ? (
-            <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">
-              {errorTraffic}
-            </div>
-          ) : trafficUpdates && trafficUpdates.segments && trafficUpdates.segments.length > 0 ? (
-            <div className="space-y-3">
-              {trafficUpdates.segments.map((segment, index) => {
-                const delayMinutes = Math.round((segment.traffic_delay_seconds || 0) / 60);
-                const hasDelay = delayMinutes > 0;
-                
-                return (
-                  <motion.div
-                    key={index}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3, delay: index * 0.1 }}
-                  >
-                    <Card className={`border ${hasDelay ? 'bg-amber-50 border-amber-200' : 'bg-slate-50 border-slate-200'}`}>
-                      <CardContent className="p-4">
-                        <div className="flex items-start gap-3">
-                          <div className={`w-10 h-10 rounded-full bg-white flex items-center justify-center ${hasDelay ? 'border-2 border-amber-300' : 'border border-slate-300'}`}>
-                            <Clock className={`w-5 h-5 ${hasDelay ? 'text-amber-600' : 'text-slate-600'}`} />
-                          </div>
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-2">
-                              <h4 className="font-semibold text-slate-800">
-                                {segment.origin} → {segment.destination}
-                              </h4>
-                              {hasDelay && (
-                                <Badge variant="outline" className="bg-amber-100 text-amber-700 border-amber-300">
-                                  +{delayMinutes} min delay
-                                </Badge>
-                              )}
-                            </div>
-                            <div className="grid grid-cols-2 gap-3 text-sm">
-                              <div>
-                                <span className="text-slate-600">Distance: </span>
-                                <span className="font-medium text-slate-800">{segment.distance || "N/A"}</span>
-                              </div>
-                              <div>
-                                <span className="text-slate-600">Duration: </span>
-                                <span className={`font-medium ${hasDelay ? 'text-amber-700' : 'text-slate-800'}`}>
-                                  {segment.duration_in_traffic || segment.duration || "N/A"}
-                                </span>
-                                {segment.duration_in_traffic && segment.duration && segment.duration !== segment.duration_in_traffic && (
-                                  <span className="text-xs text-slate-500 ml-1">
-                                    (normal: {segment.duration})
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                            {segment.route_summary && (
-                              <div className="mt-2 text-xs text-slate-500">
-                                Route: {segment.route_summary}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  </motion.div>
-                );
-              })}
-            </div>
-          ) : !loadingTraffic ? (
-            <div className="text-center py-4 text-sm text-slate-500">
-              No traffic route data available for this day
+              No weather data available for your destination
             </div>
           ) : null}
         </div>

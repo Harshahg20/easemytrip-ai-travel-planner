@@ -79,7 +79,7 @@ export default function TripPlanner() {
   const [travelDetailsError, setTravelDetailsError] = useState(null);
 
   // Fetch all component data in parallel
-  const fetchAllComponentData = useCallback(async (tripId) => {
+  const fetchAllComponentData = useCallback(async (tripId, language = "english") => {
     // Reset loading states
     setLoadingPhotos(true);
     setPhotosError(null);
@@ -101,7 +101,7 @@ export default function TripPlanner() {
         console.error("Error fetching booking prices:", err);
         throw err;
       }),
-      transportDetails: tripService.getTransportDetails(tripId).catch((err) => {
+      transportDetails: tripService.getTransportDetails(tripId, language).catch((err) => {
         console.error("Error fetching transport details:", err);
         throw err;
       }),
@@ -185,7 +185,8 @@ export default function TripPlanner() {
       setTrip(fetchedTrip);
 
       // Start fetching all component data in parallel (non-blocking)
-      fetchAllComponentData(tripId);
+      const language = currentLanguage || localStorage.getItem("tripora_language") || "english";
+      fetchAllComponentData(tripId, language);
 
       // If option_id is provided, get the selected option and its itineraries
       if (optionId) {
@@ -232,9 +233,9 @@ export default function TripPlanner() {
     loadTripData();
   }, [loadTripData]);
 
-  // Translate cached content when language changes using batch translation
+  // Refetch and translate content when language changes
   useEffect(() => {
-    const translateOnLanguageChange = async () => {
+    const handleLanguageChange = async () => {
       if (!trip?.id) return;
 
       const urlParams = new URLSearchParams(window.location.search);
@@ -242,56 +243,64 @@ export default function TripPlanner() {
 
       if (!tripId) return;
 
-      try {
-        // Translate all daily itineraries in batch
-        const translatedItineraries = await translateAllDailyItineraries(
-          tripId
-        );
+      // If language changed to non-English, refetch data with translation
+      if (currentLanguage && currentLanguage !== "english") {
+        try {
+          // Refetch component data with language parameter
+          await fetchAllComponentData(tripId, currentLanguage);
 
-        if (
-          translatedItineraries &&
-          Object.keys(translatedItineraries).length > 0
-        ) {
-          // Update daily itineraries with translated content
-          setDailyItineraries((prev) => {
-            const updated = [...prev];
-            Object.keys(translatedItineraries).forEach((dayNum) => {
-              const dayIndex = parseInt(dayNum) - 1;
-              if (updated[dayIndex]) {
-                updated[dayIndex] = translatedItineraries[dayNum];
-              }
-            });
-            return updated;
-          });
+          // Also translate daily itineraries if already loaded
+          if (dailyItineraries.length > 0) {
+            const translatedItineraries = await translateAllDailyItineraries(
+              tripId
+            );
 
-          // Also translate other content types in batch
-          const otherContentTypes = [
-            "transport_details",
-            "travel_details",
-            "booking_prices",
-          ];
-          const otherTranslated = await translateCachedContent(
-            tripId,
-            otherContentTypes
-          );
-
-          if (otherTranslated) {
-            setTranslatedContent((prev) => ({
-              ...prev,
-              ...otherTranslated,
-            }));
+            if (
+              translatedItineraries &&
+              Object.keys(translatedItineraries).length > 0
+            ) {
+              // Update daily itineraries with translated content
+              setDailyItineraries((prev) => {
+                const updated = [...prev];
+                Object.keys(translatedItineraries).forEach((dayNum) => {
+                  const dayIndex = parseInt(dayNum) - 1;
+                  if (updated[dayIndex]) {
+                    updated[dayIndex] = translatedItineraries[dayNum];
+                  }
+                });
+                return updated;
+              });
+            }
+          }
+        } catch (error) {
+          console.error("Error translating content on language change:", error);
+          // Fallback: try batch translation API
+          try {
+            const otherContentTypes = [
+              "transport_details",
+              "daily_itineraries",
+            ];
+            const translated = await translateCachedContent(
+              tripId,
+              otherContentTypes
+            );
+            if (translated) {
+              setTranslatedContent((prev) => ({
+                ...prev,
+                ...translated,
+              }));
+            }
+          } catch (fallbackError) {
+            console.error("Fallback translation also failed:", fallbackError);
           }
         }
-      } catch (error) {
-        console.error("Error translating content on language change:", error);
-        // Fallback: reload current day if batch translation fails
-        if (selectedDay) {
-          loadDayItinerary(selectedDay);
-        }
+      } else if (currentLanguage === "english") {
+        // Refetch original English content
+        await fetchAllComponentData(tripId, "english");
       }
     };
 
-    translateOnLanguageChange();
+    handleLanguageChange();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentLanguage, trip?.id]);
 
@@ -304,10 +313,12 @@ export default function TripPlanner() {
     }
   };
 
-  const loadDayItinerary = async (dayNumber) => {
+  const loadDayItinerary = async (dayNumber, language = null) => {
     if (loadingDays.has(dayNumber) || loadedDays.has(dayNumber)) {
       return; // Already loading or loaded
     }
+
+    const targetLanguage = language || currentLanguage || localStorage.getItem("tripora_language") || "english";
 
     setLoadingDays((prev) => new Set(prev).add(dayNumber));
 
@@ -320,18 +331,12 @@ export default function TripPlanner() {
         throw new Error("No trip ID provided");
       }
 
-      // Get current language and pass it to API for server-side translation
-      const currentLang =
-        currentLanguage ||
-        localStorage.getItem("tripora_language") ||
-        "english";
-
       // Generate the specific day itinerary with language parameter
       const dayData = await tripService.generateDayItinerary(
         tripId,
         dayNumber,
         optionId,
-        currentLang
+        targetLanguage
       );
 
       if (dayData && dayData.itinerary) {

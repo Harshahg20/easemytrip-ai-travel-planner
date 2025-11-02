@@ -63,6 +63,7 @@ class TripResponse(BaseModel):
     food_preference: str
     special_requirements: Optional[str]
     status: str
+    photos_base64: Optional[List[str]] = None  # Cached base64 images for planned/booked trips
     created_at: datetime
     updated_at: datetime
     selected_option: Optional[TripOptionResponse] = None

@@ -16,7 +16,20 @@ class SmartAdjustmentsService:
     """Service to fetch and analyze real-time data for smart itinerary adjustments"""
     
     def __init__(self):
-        self.weather_api_key = settings.openweather_api_key
+        # Google Weather API is available! Use it if Google Maps API key is configured
+        # Otherwise fall back to OpenWeatherMap
+        # Documentation: https://developers.google.com/maps/documentation/weather/current-conditions
+        if settings.google_maps_api_key:
+            # Use Google Weather API (same key as Google Maps)
+            self.weather_api_key = settings.google_maps_api_key
+            self.weather_api_type = "google"
+        elif settings.openweather_api_key:
+            # Fall back to OpenWeatherMap
+            self.weather_api_key = settings.openweather_api_key
+            self.weather_api_type = "openweather"
+        else:
+            self.weather_api_key = None
+            self.weather_api_type = None
         self.google_maps_key = settings.google_maps_api_key
     
     async def get_smart_adjustments(
@@ -242,12 +255,193 @@ class SmartAdjustmentsService:
         coordinates: Tuple[float, float],
         date: datetime
     ) -> Dict[str, Any]:
-        """Fetch weather data for a specific location using OpenWeatherMap API"""
+        """Fetch weather data for a specific location using Google Weather API or OpenWeatherMap"""
         if not self.weather_api_key:
             return {}
         
         try:
             lat, lng = coordinates
+            
+            if self.weather_api_type == "google":
+                return await self._fetch_google_weather_data(coordinates, date)
+            else:
+                return await self._fetch_openweather_data(coordinates, date)
+                
+        except Exception as e:
+            logger.error(f"Error fetching weather data: {e}")
+            return {}
+    
+    async def _fetch_google_weather_data(
+        self,
+        coordinates: Tuple[float, float],
+        date: datetime
+    ) -> Dict[str, Any]:
+        """Fetch weather data using Google Weather API
+        Documentation: https://developers.google.com/maps/documentation/weather/current-conditions
+        """
+        lat, lng = coordinates
+        
+        try:
+            # Google Weather API uses GET requests with URL parameters
+            # For current conditions (today)
+            if date.date() == datetime.now().date():
+                url = "https://weather.googleapis.com/v1/currentConditions:lookup"
+                params = {
+                    "key": self.weather_api_key,
+                    "location.latitude": lat,
+                    "location.longitude": lng
+                }
+                
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(url, params=params)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    # Process Google Weather API response structure
+                    # Reference: https://developers.google.com/maps/documentation/weather/current-conditions
+                    weather_condition = data.get("weatherCondition", {})
+                    condition_type = weather_condition.get("type", "CLEAR").lower()
+                    condition_desc = weather_condition.get("description", {}).get("text", "Clear")
+                    
+                    temp_obj = data.get("temperature", {})
+                    temp_value = temp_obj.get("degrees", 0)
+                    
+                    feels_like_obj = data.get("feelsLikeTemperature", {})
+                    feels_like_value = feels_like_obj.get("degrees", temp_value)
+                    
+                    wind_obj = data.get("wind", {})
+                    wind_speed_obj = wind_obj.get("speed", {})
+                    wind_speed_value = wind_speed_obj.get("value", 0)
+                    # Google API returns in KILOMETERS_PER_HOUR, no conversion needed
+                    
+                    precipitation_obj = data.get("precipitation", {})
+                    qpf_obj = precipitation_obj.get("qpf", {})
+                    rain_value = qpf_obj.get("quantity", 0)
+                    
+                    return {
+                        "condition": condition_type,
+                        "description": condition_desc,
+                        "temperature": temp_value,
+                        "feels_like": feels_like_value,
+                        "humidity": data.get("relativeHumidity", 0),
+                        "wind_speed": wind_speed_value,  # Already in km/h
+                        "clouds": data.get("cloudCover", 0),
+                        "rain": rain_value,
+                        "date": date.isoformat(),
+                        "location_coords": {"lat": lat, "lng": lng}
+                    }
+            else:
+                # For future dates, we'll fetch forecast (handled separately in _fetch_google_weather_forecast_for_period)
+                # For individual date lookup, we can use daily forecast endpoint
+                return await self._fetch_google_forecast_for_date(coordinates, date)
+                    
+        except httpx.HTTPStatusError as e:
+            error_detail = ""
+            try:
+                error_data = e.response.json()
+                error_detail = error_data.get("error", {}).get("message", str(error_data))
+            except:
+                error_detail = e.response.text[:200] if e.response.text else str(e)
+            
+            logger.error(f"Google Weather API HTTP error: {e.response.status_code} - {error_detail}")
+            return {}
+        except Exception as e:
+            logger.error(f"Error fetching Google weather data: {e}", exc_info=True)
+            return {}
+    
+    async def _fetch_google_forecast_for_date(
+        self,
+        coordinates: Tuple[float, float],
+        date: datetime
+    ) -> Dict[str, Any]:
+        """Fetch forecast for a specific date using Google Weather API daily forecast"""
+        lat, lng = coordinates
+        
+        try:
+            # Use daily forecast endpoint
+            # Documentation: https://developers.google.com/maps/documentation/weather/daily-forecast
+            # Note: Endpoint format may need to be verified with actual API
+            url = "https://weather.googleapis.com/v1/forecastDaily"
+            params = {
+                "key": self.weather_api_key,
+                "location.latitude": lat,
+                "location.longitude": lng,
+                "days": 10  # Request up to 10 days
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Find forecast for the target date
+                daily_forecast = data.get("dailyForecast", {})
+                days = daily_forecast.get("days", [])
+                
+                target_date_str = date.strftime("%Y-%m-%d")
+                
+                for day_forecast in days:
+                    forecast_date_str = day_forecast.get("date", "").split("T")[0]
+                    if forecast_date_str == target_date_str:
+                        # Process the forecast day
+                        weather_condition = day_forecast.get("weatherCondition", {})
+                        condition_type = weather_condition.get("type", "CLEAR").lower()
+                        condition_desc = weather_condition.get("description", {}).get("text", "Clear")
+                        
+                        # Get temperature (use high or average)
+                        high_temp_obj = day_forecast.get("highTemperature", {})
+                        low_temp_obj = day_forecast.get("lowTemperature", {})
+                        high_temp = high_temp_obj.get("degrees", 0)
+                        low_temp = low_temp_obj.get("degrees", 0)
+                        avg_temp = (high_temp + low_temp) / 2 if (high_temp and low_temp) else high_temp or low_temp
+                        
+                        wind_obj = day_forecast.get("wind", {})
+                        wind_speed_obj = wind_obj.get("speed", {}) if wind_obj else {}
+                        wind_speed_value = wind_speed_obj.get("value", 0) if wind_speed_obj else 0
+                        
+                        precipitation_obj = day_forecast.get("precipitation", {})
+                        qpf_obj = precipitation_obj.get("qpf", {}) if precipitation_obj else {}
+                        rain_value = qpf_obj.get("quantity", 0) if qpf_obj else 0
+                        
+                        return {
+                            "condition": condition_type,
+                            "description": condition_desc,
+                            "temperature": avg_temp,
+                            "feels_like": avg_temp,  # Forecast may not have feels_like
+                            "humidity": day_forecast.get("relativeHumidity", 0),
+                            "wind_speed": wind_speed_value,
+                            "clouds": day_forecast.get("cloudCover", 0),
+                            "rain": rain_value,
+                            "date": date.isoformat(),
+                            "location_coords": {"lat": lat, "lng": lng}
+                        }
+                
+                logger.warning(f"No forecast found for date {target_date_str}")
+                return {}
+                
+        except httpx.HTTPStatusError as e:
+            error_detail = ""
+            try:
+                error_data = e.response.json()
+                error_detail = error_data.get("error", {}).get("message", str(error_data))
+            except:
+                error_detail = e.response.text[:200] if e.response.text else str(e)
+            
+            logger.error(f"Google Weather Forecast API HTTP error: {e.response.status_code} - {error_detail}")
+            return {}
+        except Exception as e:
+            logger.error(f"Error fetching Google forecast for date: {e}", exc_info=True)
+            return {}
+    
+    async def _fetch_openweather_data(
+        self,
+        coordinates: Tuple[float, float],
+        date: datetime
+    ) -> Dict[str, Any]:
+        """Fetch weather data using OpenWeatherMap API (fallback)"""
+        lat, lng = coordinates
+        
+        try:
             # Use forecast API for future dates, current API for today
             if date.date() == datetime.now().date():
                 url = "https://api.openweathermap.org/data/2.5/weather"
@@ -257,7 +451,7 @@ class SmartAdjustmentsService:
             params = {
                 "lat": lat,
                 "lon": lng,
-                "appid": self.weather_api_key,
+                "appid": settings.openweather_api_key,
                 "units": "metric"
             }
             
@@ -309,10 +503,10 @@ class SmartAdjustmentsService:
                     return {}
                     
         except httpx.HTTPError as e:
-            logger.error(f"HTTP error fetching weather: {e}")
+            logger.error(f"HTTP error fetching OpenWeather data: {e}")
             return {}
         except Exception as e:
-            logger.error(f"Error fetching weather data: {e}")
+            logger.error(f"Error fetching OpenWeather data: {e}")
             return {}
     
     async def _fetch_weather_forecast_for_period(
@@ -323,8 +517,154 @@ class SmartAdjustmentsService:
     ) -> Optional[Dict[str, Any]]:
         """Fetch weather forecast for a date range and organize by date"""
         if not self.weather_api_key:
-            logger.warning("OpenWeatherMap API key not configured")
+            api_name = "Google Maps" if self.weather_api_type == "google" else "OpenWeatherMap"
+            logger.warning(f"{api_name} API key not configured")
             return None
+        
+        if self.weather_api_type == "google":
+            return await self._fetch_google_weather_forecast_for_period(coordinates, start_date, end_date)
+        else:
+            return await self._fetch_openweather_forecast_for_period(coordinates, start_date, end_date)
+    
+    async def _fetch_google_weather_forecast_for_period(
+        self,
+        coordinates: Tuple[float, float],
+        start_date: datetime,
+        end_date: datetime
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch Google Weather API forecast for a date range
+        Documentation: https://developers.google.com/maps/documentation/weather/daily-forecast
+        """
+        try:
+            lat, lng = coordinates
+            # Google Weather API uses GET requests with URL parameters
+            url = "https://weather.googleapis.com/v1/forecastDaily:lookup"
+            
+            # Calculate number of days needed (up to 10 days max per API)
+            total_days = (end_date.date() - start_date.date()).days + 1
+            days_param = min(total_days, 10)  # Google API supports up to 10 days
+            
+            params = {
+                "key": self.weather_api_key,
+                "location.latitude": lat,
+                "location.longitude": lng,
+                "days": days_param
+            }
+            
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Organize forecasts by date
+                forecast_by_date = {}
+                
+                # Get daily forecast
+                daily_forecast = data.get("dailyForecast", {})
+                days = daily_forecast.get("days", [])
+                
+                if not days:
+                    logger.warning("No forecast data in Google Weather API response")
+                    return None
+                
+                # Process each day's forecast
+                for day_forecast in days:
+                    date_str = day_forecast.get("date", "")
+                    if date_str:
+                        # Parse date string (format: "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SSZ")
+                        try:
+                            forecast_date = datetime.strptime(date_str.split("T")[0], "%Y-%m-%d").date()
+                            # Only include dates within trip period
+                            if start_date.date() <= forecast_date <= end_date.date():
+                                date_key = forecast_date.isoformat()
+                                
+                                # Process Google Weather API response structure
+                                weather_condition = day_forecast.get("weatherCondition", {})
+                                condition_type = weather_condition.get("type", "CLEAR").lower()
+                                condition_desc = weather_condition.get("description", {}).get("text", "Clear")
+                                
+                                # Get temperature (average of high and low)
+                                high_temp_obj = day_forecast.get("highTemperature", {})
+                                low_temp_obj = day_forecast.get("lowTemperature", {})
+                                high_temp = high_temp_obj.get("degrees", 0)
+                                low_temp = low_temp_obj.get("degrees", 0)
+                                avg_temp = (high_temp + low_temp) / 2 if (high_temp and low_temp) else high_temp or low_temp
+                                
+                                wind_obj = day_forecast.get("wind", {})
+                                wind_speed_obj = wind_obj.get("speed", {}) if wind_obj else {}
+                                wind_speed_value = wind_speed_obj.get("value", 0) if wind_speed_obj else 0
+                                
+                                precipitation_obj = day_forecast.get("precipitation", {})
+                                qpf_obj = precipitation_obj.get("qpf", {}) if precipitation_obj else {}
+                                rain_value = qpf_obj.get("quantity", 0) if qpf_obj else 0
+                                
+                                forecast_by_date[date_key] = {
+                                    "condition": condition_type,
+                                    "description": condition_desc,
+                                    "temperature": avg_temp,
+                                    "feels_like": avg_temp,  # Forecast may not have separate feels_like
+                                    "humidity": day_forecast.get("relativeHumidity", 0),
+                                    "wind_speed": wind_speed_value,  # Already in km/h
+                                    "clouds": day_forecast.get("cloudCover", 0),
+                                    "rain": rain_value,
+                                    "date": date_str,
+                                    "location_coords": {"lat": lat, "lng": lng}
+                                }
+                        except Exception as e:
+                            logger.warning(f"Error parsing forecast date {date_str}: {e}")
+                            continue
+                
+                # For today, also get current conditions (more accurate than forecast)
+                if start_date.date() == datetime.now().date():
+                    current_weather = await self._fetch_google_weather_data(coordinates, datetime.now())
+                    if current_weather:
+                        today_key = datetime.now().date().isoformat()
+                        forecast_by_date[today_key] = current_weather
+                
+                logger.info(f"Fetched Google weather forecast for {len(forecast_by_date)} dates")
+                
+                if not forecast_by_date:
+                    logger.warning("No forecast data within trip period")
+                    return None
+                
+                return {
+                    "destination_coordinates": coordinates,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "forecast_by_date": forecast_by_date,
+                    "cached_at": datetime.now().isoformat()
+                }
+                
+        except httpx.HTTPStatusError as e:
+            error_detail = ""
+            try:
+                error_data = e.response.json()
+                error_detail = error_data.get("error", {}).get("message", str(error_data))
+            except:
+                error_detail = e.response.text[:200] if e.response.text else str(e)
+            
+            logger.error(f"HTTP status error fetching Google weather forecast: {e.response.status_code} - {error_detail}")
+            if e.response.status_code == 401:
+                logger.error("Invalid Google Maps API key. Please check your GOOGLE_MAPS_API_KEY environment variable.")
+            elif e.response.status_code == 403:
+                logger.error("Google Weather API not enabled or API key lacks permissions. Please enable Weather API in Google Cloud Console.")
+            elif e.response.status_code == 429:
+                logger.error("Google Weather API rate limit exceeded. Please try again later.")
+            return None
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error fetching Google weather forecast: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching Google weather forecast: {e}", exc_info=True)
+            return None
+    
+    async def _fetch_openweather_forecast_for_period(
+        self,
+        coordinates: Tuple[float, float],
+        start_date: datetime,
+        end_date: datetime
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch OpenWeatherMap forecast for a date range (fallback)"""
         
         try:
             lat, lng = coordinates
@@ -430,11 +770,18 @@ class SmartAdjustmentsService:
                     "cached_at": datetime.now().isoformat()
                 }
                 
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP status error fetching weather forecast: {e.response.status_code} - {e.response.text}")
+            if e.response.status_code == 401:
+                logger.error("Invalid OpenWeatherMap API key. Please check your OPENWEATHER_API_KEY environment variable.")
+            elif e.response.status_code == 429:
+                logger.error("OpenWeatherMap API rate limit exceeded. Please try again later.")
+            return None
         except httpx.HTTPError as e:
             logger.error(f"HTTP error fetching weather forecast: {e}")
             return None
         except Exception as e:
-            logger.error(f"Error fetching weather forecast: {e}")
+            logger.error(f"Error fetching weather forecast: {e}", exc_info=True)
             return None
     
     async def _fetch_traffic_data(

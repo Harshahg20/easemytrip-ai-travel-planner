@@ -1,5 +1,9 @@
 from typing import Dict, List, Any, Optional, Union
 import logging
+import hashlib
+import json
+import uuid
+from datetime import datetime, timedelta
 from ..core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -377,8 +381,179 @@ class TranslationService:
         ]
         
         return await self.translate_dict(itinerary_data, target_language, keys_to_translate)
+    
+    def _generate_content_hash(self, content: Any) -> str:
+        """Generate a hash for content to use as cache key"""
+        content_str = json.dumps(content, sort_keys=True, default=str)
+        return hashlib.sha256(content_str.encode()).hexdigest()
 
 
-# Create singleton instance
+class TranslationCacheService:
+    """
+    Service to manage translation caching in database.
+    Provides methods to store and retrieve translations efficiently.
+    """
+    
+    def __init__(self):
+        self._db = None
+    
+    def set_db(self, db_session):
+        """Set database session (dependency injection pattern)"""
+        self._db = db_session
+    
+    async def get_translation(
+        self,
+        content_hash: str,
+        content_type: str,
+        target_language: str,
+        source_language: str = "en"
+    ) -> Optional[Any]:
+        """
+        Get cached translation from database.
+        
+        Args:
+            content_hash: Hash of the original content
+            content_type: Type of content (e.g., 'daily_itineraries')
+            target_language: Target language code (e.g., 'hi', 'kn')
+            source_language: Source language code (default: 'en')
+        
+        Returns:
+            Translated content if found, None otherwise
+        """
+        if not self._db:
+            return None
+        
+        try:
+            from ..models.trip import TranslationCache
+            
+            # Check if translation exists and is not expired
+            now = datetime.utcnow()
+            cached = self._db.query(TranslationCache).filter(
+                TranslationCache.content_hash == content_hash,
+                TranslationCache.content_type == content_type,
+                TranslationCache.target_language == target_language,
+                TranslationCache.source_language == source_language,
+                (TranslationCache.expires_at.is_(None)) | (TranslationCache.expires_at > now)
+            ).first()
+            
+            if cached:
+                logger.debug(f"Found cached translation for {content_type} ({target_language})")
+                return cached.translated_content
+            
+            return None
+        except Exception as e:
+            logger.warning(f"Error retrieving translation from cache: {e}")
+            return None
+    
+    async def store_translation(
+        self,
+        content_hash: str,
+        content_type: str,
+        original_content: Any,
+        translated_content: Any,
+        target_language: str,
+        source_language: str = "en",
+        trip_id: Optional[str] = None,
+        cache_key: Optional[str] = None,
+        ttl_hours: Optional[int] = 168  # Default 7 days
+    ) -> str:
+        """
+        Store translation in database.
+        
+        Args:
+            content_hash: Hash of the original content
+            content_type: Type of content
+            original_content: Original content (English)
+            translated_content: Translated content
+            target_language: Target language code
+            source_language: Source language code (default: 'en')
+            trip_id: Optional trip ID
+            cache_key: Optional reference to content_cache key
+            ttl_hours: Time to live in hours (default: 7 days)
+        
+        Returns:
+            Translation cache ID
+        """
+        if not self._db:
+            return None
+        
+        try:
+            from ..models.trip import TranslationCache
+            
+            # Check if translation already exists
+            existing = self._db.query(TranslationCache).filter(
+                TranslationCache.content_hash == content_hash,
+                TranslationCache.content_type == content_type,
+                TranslationCache.target_language == target_language,
+                TranslationCache.source_language == source_language
+            ).first()
+            
+            translation_id = str(uuid.uuid4())
+            expires_at = None
+            if ttl_hours:
+                expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+            
+            if existing:
+                # Update existing translation
+                existing.translated_content = translated_content
+                existing.updated_at = datetime.utcnow()
+                existing.expires_at = expires_at
+                translation_id = existing.id
+            else:
+                # Create new translation cache entry
+                new_cache = TranslationCache(
+                    id=translation_id,
+                    trip_id=trip_id,
+                    content_type=content_type,
+                    content_hash=content_hash,
+                    source_language=source_language,
+                    target_language=target_language,
+                    original_content=original_content,
+                    translated_content=translated_content,
+                    cache_key=cache_key,
+                    expires_at=expires_at
+                )
+                self._db.add(new_cache)
+            
+            self._db.commit()
+            logger.debug(f"Stored translation cache for {content_type} ({target_language})")
+            return translation_id
+            
+        except Exception as e:
+            logger.error(f"Error storing translation in cache: {e}")
+            if self._db:
+                self._db.rollback()
+            return None
+    
+    async def clear_expired_translations(self, trip_id: Optional[str] = None):
+        """Clear expired translations from database"""
+        if not self._db:
+            return
+        
+        try:
+            from ..models.trip import TranslationCache
+            
+            now = datetime.utcnow()
+            query = self._db.query(TranslationCache).filter(
+                TranslationCache.expires_at.isnot(None),
+                TranslationCache.expires_at < now
+            )
+            
+            if trip_id:
+                query = query.filter(TranslationCache.trip_id == trip_id)
+            
+            deleted_count = query.delete()
+            self._db.commit()
+            
+            if deleted_count > 0:
+                logger.info(f"Cleared {deleted_count} expired translations")
+        except Exception as e:
+            logger.error(f"Error clearing expired translations: {e}")
+            if self._db:
+                self._db.rollback()
+
+
+# Create singleton instances
 translation_service = TranslationService()
+translation_cache_service = TranslationCacheService()
 

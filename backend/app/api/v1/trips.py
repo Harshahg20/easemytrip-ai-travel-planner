@@ -1,20 +1,25 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Body, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Body, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 import uuid
 import logging
 from datetime import datetime, timedelta
 import asyncio
+import base64
+import httpx
+import json
+import hashlib
 
 logger = logging.getLogger(__name__)
 
 from ...core.database import get_db
-from ...models.trip import Trip, DailyItinerary, TripOption
+from ...models.trip import Trip, DailyItinerary, TripOption, TripContentCache
 from ...services.google_ai_service import google_ai_service
 from ...services.google_maps_service import google_maps_service
 from ...services.smart_adjustments_service import smart_adjustments_service
 from ...services.translation_service import translation_service
 from ...services.content_cache_service import content_cache_service
+from ...services.enhanced_translation_service import enhanced_translation_service
 from ...core.config import settings
 from ..schemas.trip import (
     TripCreate, TripResponse, TripUpdate,
@@ -23,6 +28,146 @@ from ..schemas.trip import (
 )
 
 router = APIRouter()
+
+
+def _generate_content_hash(content: Any) -> str:
+    """Generate hash for content"""
+    content_str = json.dumps(content, sort_keys=True, default=str)
+    return hashlib.sha256(content_str.encode()).hexdigest()
+
+
+async def _store_content_in_db(
+    db: Session,
+    trip_id: str,
+    content_type: str,
+    content: Any,
+    ttl_hours: Optional[int] = None
+):
+    """
+    Store content in database for persistent storage.
+    Used for planned/booked trips to ensure content survives server restarts.
+    """
+    try:
+        content_hash = _generate_content_hash(content)
+        
+        # Check if content already exists
+        existing = db.query(TripContentCache).filter(
+            TripContentCache.trip_id == trip_id,
+            TripContentCache.content_type == content_type
+        ).first()
+        
+        expires_at = None
+        if ttl_hours:
+            expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+        
+        if existing:
+            # Update existing content
+            existing.content = content
+            existing.content_hash = content_hash
+            existing.updated_at = datetime.utcnow()
+            existing.expires_at = expires_at
+            logger.debug(f"Updated DB cache for {content_type} in trip {trip_id}")
+        else:
+            # Create new content cache entry
+            cache_id = str(uuid.uuid4())
+            new_cache = TripContentCache(
+                id=cache_id,
+                trip_id=trip_id,
+                content_type=content_type,
+                content=content,
+                content_hash=content_hash,
+                expires_at=expires_at
+            )
+            db.add(new_cache)
+            logger.debug(f"Stored {content_type} in DB for trip {trip_id}")
+        
+        db.commit()
+    except Exception as e:
+        logger.error(f"Error storing content in DB: {e}")
+        db.rollback()
+
+
+async def _get_content_from_db(
+    db: Session,
+    trip_id: str,
+    content_type: str
+) -> Optional[Any]:
+    """
+    Retrieve content from database.
+    Returns None if not found or expired.
+    """
+    try:
+        now = datetime.utcnow()
+        cached = db.query(TripContentCache).filter(
+            TripContentCache.trip_id == trip_id,
+            TripContentCache.content_type == content_type,
+            (TripContentCache.expires_at.is_(None)) | (TripContentCache.expires_at > now)
+        ).first()
+        
+        if cached:
+            logger.debug(f"Retrieved {content_type} from DB for trip {trip_id}")
+            return cached.content
+        
+        return None
+    except Exception as e:
+        logger.warning(f"Error retrieving content from DB: {e}")
+        return None
+
+
+async def _precache_travel_and_transport(
+    trip_id: str,
+    trip_data: Dict[str, Any],
+    translation_service
+):
+    """
+    Background task to pre-cache travel and transport details when trip becomes planned.
+    This ensures content is ready for translation requests.
+    Stores in both in-memory cache and database.
+    Creates a new DB session for background task.
+    """
+    # Get a new database session for background task
+    from ...core.database import SessionLocal
+    db = SessionLocal()
+    
+    try:
+        logger.info(f"Pre-caching travel and transport details for trip {trip_id}")
+        
+        # Generate and cache travel details
+        travel_details = await google_ai_service.generate_travel_details(trip_data)
+        
+        # Store in in-memory cache
+        await translation_service.cache_api_response(
+            trip_id=trip_id,
+            content_type="travel_details",
+            content=travel_details,
+            ttl_hours=168  # 7 days cache for planned trips
+        )
+        
+        # Store in database
+        await _store_content_in_db(db, trip_id, "travel_details", travel_details, ttl_hours=168)
+        
+        logger.info(f"Pre-cached travel details for trip {trip_id}")
+        
+        # Generate and cache transport details
+        transport_details = await google_ai_service.generate_transport_details(trip_data)
+        
+        # Store in in-memory cache
+        await translation_service.cache_api_response(
+            trip_id=trip_id,
+            content_type="transport_details",
+            content=transport_details,
+            ttl_hours=168  # 7 days cache for planned trips
+        )
+        
+        # Store in database
+        await _store_content_in_db(db, trip_id, "transport_details", transport_details, ttl_hours=168)
+        
+        logger.info(f"Pre-cached transport details for trip {trip_id}")
+        
+    except Exception as e:
+        logger.error(f"Error pre-caching travel/transport details for trip {trip_id}: {e}")
+    finally:
+        db.close()
 
 
 @router.post("/", response_model=TripResponse)
@@ -112,6 +257,7 @@ async def get_trip(trip_id: str, db: Session = Depends(get_db)):
         "food_preference": trip.food_preference,
         "special_requirements": trip.special_requirements,
         "status": trip.status,
+        "photos_base64": trip.photos_base64,  # Include cached photos if available
         "created_at": trip.created_at,
         "updated_at": trip.updated_at,
         "selected_option": selected_option_dict
@@ -542,7 +688,12 @@ async def get_trip_options(trip_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{trip_id}/select-option/{option_id}")
-async def select_trip_option(trip_id: str, option_id: str, db: Session = Depends(get_db)):
+async def select_trip_option(
+    trip_id: str,
+    option_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     """Select a trip option and create daily itineraries"""
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
@@ -600,6 +751,34 @@ async def select_trip_option(trip_id: str, option_id: str, db: Session = Depends
         
         db.commit()
         
+        # Set db session for enhanced translation service
+        enhanced_translation_service.set_db(db)
+        
+        # After trip becomes planned, pre-cache travel and transport details for faster access
+        # This happens in background - don't block the response
+        try:
+            # Pre-generate and cache travel details (non-blocking)
+            total_days = (trip.end_date - trip.start_date).days + 1
+            trip_data = {
+                "destination": trip.destination,
+                "duration": total_days,
+                "total_days": total_days,
+                "total_budget": trip.total_budget,
+                "travelers": trip.travelers,
+                "transportation_preference": trip.transportation_preference,
+                "start_date": trip.start_date.isoformat(),
+                "end_date": trip.end_date.isoformat()
+            }
+            
+            # Schedule background task to generate and cache travel/transport details
+            # The background task will create its own DB session
+            background_tasks.add_task(
+                _precache_travel_and_transport, trip_id, trip_data, enhanced_translation_service
+            )
+        except Exception as e:
+            logger.warning(f"Failed to pre-cache travel/transport details: {e}")
+            # Don't fail the request if pre-caching fails
+        
         return {"message": "Trip option selected successfully", "option_id": option_id}
         
     except Exception as e:
@@ -611,8 +790,12 @@ async def select_trip_option(trip_id: str, option_id: str, db: Session = Depends
 
 
 @router.get("/{trip_id}/itinerary", response_model=List[DailyItineraryResponse])
-async def get_trip_itinerary(trip_id: str, db: Session = Depends(get_db)):
-    """Get daily itinerary for a trip"""
+async def get_trip_itinerary(
+    trip_id: str,
+    language: str = Query(default="english", description="Target language for translation"),
+    db: Session = Depends(get_db)
+):
+    """Get daily itinerary for a trip with optional translation"""
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
@@ -620,11 +803,55 @@ async def get_trip_itinerary(trip_id: str, db: Session = Depends(get_db)):
             detail="Trip not found"
         )
     
+    # Set db session for translation cache
+    enhanced_translation_service.set_db(db)
+    
     itineraries = db.query(DailyItinerary).filter(
         DailyItinerary.trip_id == trip_id
     ).order_by(DailyItinerary.day_number).all()
     
-    return itineraries
+    # Convert to dict format for caching and translation
+    itineraries_data = []
+    for itinerary in itineraries:
+        itinerary_dict = {
+            "id": itinerary.id,
+            "trip_id": itinerary.trip_id,
+            "day_number": itinerary.day_number,
+            "date": itinerary.date.isoformat() if itinerary.date else None,
+            "daily_budget": itinerary.daily_budget,
+            "activities": itinerary.activities or [],
+            "meals": itinerary.meals or [],
+            "accommodation": itinerary.accommodation or {},
+            "transport": itinerary.transport or {},
+            "created_at": itinerary.created_at.isoformat() if itinerary.created_at else None,
+            "updated_at": itinerary.updated_at.isoformat() if itinerary.updated_at else None,
+        }
+        itineraries_data.append(itinerary_dict)
+    
+    # Cache the original content for translation lookup (longer cache for planned trips)
+    cache_ttl = 168 if trip.status in ["planned", "booked", "completed"] else 24
+    if itineraries_data:
+        await enhanced_translation_service.cache_api_response(
+            trip_id=trip_id,
+            content_type="daily_itineraries",
+            content=itineraries_data,
+            ttl_hours=cache_ttl
+        )
+    
+    # Translate if needed
+    if language.lower() != "english" and itineraries_data:
+        try:
+            translated = await enhanced_translation_service.get_translated_content(
+                trip_id=trip_id,
+                content_type="daily_itineraries",
+                target_language=language
+            )
+            if translated:
+                return translated
+        except Exception as e:
+            logger.warning(f"Translation failed, returning original: {e}")
+    
+    return itineraries_data
 
 
 @router.post("/{trip_id}/recommendations")
@@ -699,7 +926,9 @@ async def search_places(
 
 @router.get("/{trip_id}/photos", response_model=Dict[str, Any])
 async def get_destination_photos(trip_id: str, db: Session = Depends(get_db)):
-    """Return a list of destination photo URLs using Google Places Photos API.
+    """Return a list of destination photos.
+    For planned/booked trips: Returns cached base64 images from database (no API calls).
+    For draft trips: Fetches and returns photo URLs from Google Places API.
     Optimized with parallel search strategies.
     Requires Google Maps Platform API key with Places API enabled.
     """
@@ -709,6 +938,20 @@ async def get_destination_photos(trip_id: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Trip not found"
         )
+    
+    # For planned/booked/completed trips, check if we have cached base64 images
+    if trip.status in ["planned", "booked", "completed"]:
+        if trip.photos_base64 and isinstance(trip.photos_base64, list) and len(trip.photos_base64) > 0:
+            logger.info(f"Returning {len(trip.photos_base64)} cached base64 photos for {trip.status} trip {trip_id}")
+            return {
+                "destination": trip.destination,
+                "photos": trip.photos_base64,
+                "cached": True,
+                "format": "base64"
+            }
+        else:
+            # Trip is planned but no cached images - fetch and cache them
+            logger.info(f"Trip {trip_id} is {trip.status} but has no cached photos. Fetching and caching...")
 
     if not settings.google_maps_api_key or settings.google_maps_api_key == "your_google_maps_api_key_here":
         raise HTTPException(
@@ -843,10 +1086,73 @@ async def get_destination_photos(trip_id: str, db: Session = Depends(get_db)):
                 f"Searched {len(places)} places. "
                 f"Coordinates: {coords}"
             )
-            return {"destination": trip.destination, "photos": []}
+            return {"destination": trip.destination, "photos": [], "cached": False, "format": "url"}
 
-        logger.info(f"Successfully found {len(photo_urls)} photos for {trip.destination}")
-        return {"destination": trip.destination, "photos": photo_urls[:12]}
+        final_photo_urls = photo_urls[:12]
+        logger.info(f"Successfully found {len(final_photo_urls)} photos for {trip.destination}")
+        
+        # If trip is planned/booked/completed, convert photos to base64 and cache them
+        if trip.status in ["planned", "booked", "completed"]:
+            try:
+                logger.info(f"Converting {len(final_photo_urls)} photos to base64 for caching...")
+                photos_base64 = []
+                
+                async def fetch_and_encode(url):
+                    """Fetch image from URL and convert to base64 data URI"""
+                    try:
+                        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                            response = await client.get(url)
+                            if response.status_code == 200:
+                                # Convert to base64
+                                image_base64 = base64.b64encode(response.content).decode('utf-8')
+                                # Determine content type from response or default to jpeg
+                                content_type = response.headers.get('content-type', 'image/jpeg')
+                                # Return data URI format: data:image/jpeg;base64,...
+                                return f"data:{content_type};base64,{image_base64}"
+                            else:
+                                logger.warning(f"Failed to fetch photo: HTTP {response.status_code}")
+                                return None
+                    except httpx.TimeoutException:
+                        logger.warning(f"Timeout fetching photo from {url[:50]}...")
+                        return None
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch and encode photo from {url[:50]}...: {e}")
+                        return None
+                
+                # Fetch and convert all photos in parallel (limit concurrency to avoid overwhelming)
+                encode_tasks = [fetch_and_encode(url) for url in final_photo_urls]
+                encoded_results = await asyncio.gather(*encode_tasks, return_exceptions=True)
+                
+                # Filter out None, exceptions, and invalid results
+                for result in encoded_results:
+                    if result and not isinstance(result, Exception) and isinstance(result, str) and result.startswith("data:image"):
+                        photos_base64.append(result)
+                
+                if photos_base64:
+                    # Store in database
+                    trip.photos_base64 = photos_base64
+                    trip.updated_at = datetime.utcnow()
+                    db.commit()
+                    logger.info(f"Cached {len(photos_base64)} photos as base64 for {trip.status} trip {trip_id}")
+                    return {
+                        "destination": trip.destination,
+                        "photos": photos_base64,
+                        "cached": True,
+                        "format": "base64"
+                    }
+                else:
+                    logger.warning("Failed to encode any photos, returning URLs instead")
+            except Exception as e:
+                logger.error(f"Error caching photos as base64: {e}", exc_info=True)
+                # Continue to return URLs if caching fails
+        
+        # Return URLs for draft trips or if caching failed
+        return {
+            "destination": trip.destination,
+            "photos": final_photo_urls,
+            "cached": False,
+            "format": "url"
+        }
     except Exception as e:
         logger.error(f"Error fetching destination photos: {e}", exc_info=True)
         raise HTTPException(
@@ -1125,8 +1431,17 @@ async def adjust_itinerary(
 
 
 @router.get("/{trip_id}/transport-details", response_model=Dict[str, Any])
-async def get_transport_details(trip_id: str, db: Session = Depends(get_db)):
-    """Get local transport details (city/local transport) based on budget and total days"""
+async def get_transport_details(
+    trip_id: str,
+    language: str = Query(default="english", description="Target language for translation"),
+    force_regenerate: bool = Query(default=False, description="Force regeneration even for planned trips"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get local transport details (city/local transport) based on budget and total days.
+    For planned/booked trips: Returns cached content (translated if needed).
+    For new trips: Generates new content and caches it.
+    """
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
@@ -1134,7 +1449,51 @@ async def get_transport_details(trip_id: str, db: Session = Depends(get_db)):
             detail="Trip not found"
         )
     
+    # Set db session for translation cache
+    enhanced_translation_service.set_db(db)
+    
     try:
+        # For planned/booked/completed trips, check cache first (unless forced to regenerate)
+        if trip.status in ["planned", "booked", "completed"] and not force_regenerate:
+            # First check database (persistent storage)
+            cached_content = await _get_content_from_db(db, trip_id, "transport_details")
+            
+            # If not in DB, check in-memory cache
+            if not cached_content:
+                cached_content = await enhanced_translation_service.content_cache.get(trip_id, "transport_details")
+                # If found in memory cache, also store in DB for persistence
+                if cached_content:
+                    await _store_content_in_db(db, trip_id, "transport_details", cached_content, ttl_hours=168)
+            
+            if cached_content:
+                logger.info(f"Returning cached transport details for {trip.status} trip {trip_id}")
+                
+                # Also update in-memory cache for faster subsequent access
+                await enhanced_translation_service.cache_api_response(
+                    trip_id=trip_id,
+                    content_type="transport_details",
+                    content=cached_content,
+                    ttl_hours=168
+                )
+                
+                # Translate if needed
+                if language.lower() != "english":
+                    try:
+                        translated = await enhanced_translation_service.get_translated_content(
+                            trip_id=trip_id,
+                            content_type="transport_details",
+                            target_language=language
+                        )
+                        if translated:
+                            return translated
+                    except Exception as e:
+                        logger.warning(f"Translation failed, returning cached original: {e}")
+                
+                return cached_content
+        
+        # Generate new content (for draft trips, or when cache is missing, or when forced)
+        logger.info(f"Generating transport details for trip {trip_id} (status: {trip.status})")
+        
         # Calculate total days
         total_days = (trip.end_date - trip.start_date).days + 1
         
@@ -1153,18 +1512,38 @@ async def get_transport_details(trip_id: str, db: Session = Depends(get_db)):
         # Generate transport details using AI
         transport_details = await google_ai_service.generate_transport_details(trip_data)
         
-        # Store original content in cache
-        await content_cache_service.store(
+        # Cache the original content (important for planned/booked trips)
+        cache_ttl = 168 if trip.status in ["planned", "booked", "completed"] else 24
+        
+        # Store in in-memory cache
+        await enhanced_translation_service.cache_api_response(
             trip_id=trip_id,
             content_type="transport_details",
             content=transport_details,
-            ttl_hours=24
+            ttl_hours=cache_ttl
         )
+        
+        # Store in database for planned/booked trips (persistent storage)
+        if trip.status in ["planned", "booked", "completed"]:
+            await _store_content_in_db(db, trip_id, "transport_details", transport_details, ttl_hours=cache_ttl)
+        
+        # Translate if needed
+        if language.lower() != "english":
+            try:
+                translated = await enhanced_translation_service.get_translated_content(
+                    trip_id=trip_id,
+                    content_type="transport_details",
+                    target_language=language
+                )
+                if translated:
+                    return translated
+            except Exception as e:
+                logger.warning(f"Translation failed, returning original: {e}")
         
         return transport_details
         
     except Exception as e:
-        logger.error(f"Error fetching transport details: {e}")
+        logger.error(f"Error fetching transport details: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching transport details: {str(e)}"
@@ -1172,8 +1551,17 @@ async def get_transport_details(trip_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{trip_id}/travel-details", response_model=Dict[str, Any])
-async def get_travel_details(trip_id: str, db: Session = Depends(get_db)):
-    """Get inter-city travel details (flights, trains, buses) based on budget and total days"""
+async def get_travel_details(
+    trip_id: str,
+    language: str = Query(default="english", description="Target language for translation"),
+    force_regenerate: bool = Query(default=False, description="Force regeneration even for planned trips"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get inter-city travel details (flights, trains, buses) based on budget and total days.
+    For planned/booked trips: Returns cached content (translated if needed).
+    For new trips: Generates new content and caches it.
+    """
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
@@ -1181,7 +1569,51 @@ async def get_travel_details(trip_id: str, db: Session = Depends(get_db)):
             detail="Trip not found"
         )
     
+    # Set db session for translation cache
+    enhanced_translation_service.set_db(db)
+    
     try:
+        # For planned/booked/completed trips, check cache first (unless forced to regenerate)
+        if trip.status in ["planned", "booked", "completed"] and not force_regenerate:
+            # First check database (persistent storage)
+            cached_content = await _get_content_from_db(db, trip_id, "travel_details")
+            
+            # If not in DB, check in-memory cache
+            if not cached_content:
+                cached_content = await enhanced_translation_service.content_cache.get(trip_id, "travel_details")
+                # If found in memory cache, also store in DB for persistence
+                if cached_content:
+                    await _store_content_in_db(db, trip_id, "travel_details", cached_content, ttl_hours=168)
+            
+            if cached_content:
+                logger.info(f"Returning cached travel details for {trip.status} trip {trip_id}")
+                
+                # Also update in-memory cache for faster subsequent access
+                await enhanced_translation_service.cache_api_response(
+                    trip_id=trip_id,
+                    content_type="travel_details",
+                    content=cached_content,
+                    ttl_hours=168
+                )
+                
+                # Translate if needed
+                if language.lower() != "english":
+                    try:
+                        translated = await enhanced_translation_service.get_translated_content(
+                            trip_id=trip_id,
+                            content_type="travel_details",
+                            target_language=language
+                        )
+                        if translated:
+                            return translated
+                    except Exception as e:
+                        logger.warning(f"Translation failed, returning cached original: {e}")
+                
+                return cached_content
+        
+        # Generate new content (for draft trips, or when cache is missing, or when forced)
+        logger.info(f"Generating travel details for trip {trip_id} (status: {trip.status})")
+        
         # Calculate total days
         total_days = (trip.end_date - trip.start_date).days + 1
         
@@ -1200,18 +1632,38 @@ async def get_travel_details(trip_id: str, db: Session = Depends(get_db)):
         # Generate travel details using AI
         travel_details = await google_ai_service.generate_travel_details(trip_data)
         
-        # Store original content in cache
-        await content_cache_service.store(
+        # Cache the original content (important for planned/booked trips)
+        cache_ttl = 168 if trip.status in ["planned", "booked", "completed"] else 24
+        
+        # Store in in-memory cache
+        await enhanced_translation_service.cache_api_response(
             trip_id=trip_id,
             content_type="travel_details",
             content=travel_details,
-            ttl_hours=24
+            ttl_hours=cache_ttl
         )
+        
+        # Store in database for planned/booked trips (persistent storage)
+        if trip.status in ["planned", "booked", "completed"]:
+            await _store_content_in_db(db, trip_id, "travel_details", travel_details, ttl_hours=cache_ttl)
+        
+        # Translate if needed
+        if language.lower() != "english":
+            try:
+                translated = await enhanced_translation_service.get_translated_content(
+                    trip_id=trip_id,
+                    content_type="travel_details",
+                    target_language=language
+                )
+                if translated:
+                    return translated
+            except Exception as e:
+                logger.warning(f"Translation failed, returning original: {e}")
         
         return travel_details
         
     except Exception as e:
-        logger.error(f"Error fetching travel details: {e}")
+        logger.error(f"Error fetching travel details: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching travel details: {str(e)}"
@@ -1489,8 +1941,9 @@ async def translate_cached_content_batch(
     db: Session = Depends(get_db)
 ):
     """
-    Translate cached content in batches by content type.
+    Translate cached content in batches by content type using enhanced translation service.
     Retrieves original content from cache and translates each type separately.
+    Uses database cache for efficient translation storage.
     """
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
@@ -1499,6 +1952,9 @@ async def translate_cached_content_batch(
             detail="Trip not found"
         )
     
+    # Set db session for translation cache
+    enhanced_translation_service.set_db(db)
+    
     if target_language.lower() == "english":
         return {
             "message": "Target language is English, no translation needed",
@@ -1506,45 +1962,12 @@ async def translate_cached_content_batch(
         }
     
     try:
-        translated_results = {}
-        
-        for content_type in content_types:
-            # Get all cached content of this type
-            cached_items = await content_cache_service.get_all_by_type(trip_id, content_type)
-            
-            if not cached_items:
-                logger.warning(f"No cached content found for type: {content_type}")
-                translated_results[content_type] = None
-                continue
-            
-            # Use the most recent cached item
-            latest_item = max(cached_items, key=lambda x: x['created_at'])
-            original_content = latest_item['data']
-            
-            # Translate based on content type
-            if content_type.startswith("daily_itinerary_"):
-                # Translate daily itinerary
-                translated_content = await translation_service.translate_itinerary(
-                    original_content, target_language
-                )
-                translated_results[content_type] = translated_content
-            elif content_type == "trip_options":
-                # Translate trip options (list of options)
-                translated_options = []
-                for option in original_content:
-                    translated_option = await translation_service.translate_itinerary(
-                        option, target_language
-                    )
-                    translated_options.append(translated_option)
-                translated_results[content_type] = translated_options
-            else:
-                # Generic translation for other content types
-                translated_content = await translation_service.translate_dict(
-                    original_content, target_language
-                )
-                translated_results[content_type] = translated_content
-            
-            logger.info(f"Translated {content_type} to {target_language}")
+        # Use enhanced translation service for batch translation
+        translated_results = await enhanced_translation_service.translate_cached_content_batch(
+            trip_id=trip_id,
+            content_types=content_types,
+            target_language=target_language
+        )
         
         return {
             "trip_id": trip_id,
@@ -1637,13 +2060,223 @@ async def get_cache_stats(
     return stats
 
 
+@router.get("/{trip_id}/weather", response_model=Dict[str, Any])
+async def get_trip_weather(
+    trip_id: str,
+    db: Session = Depends(get_db)
+):
+    """Get weather data for destination for entire trip period"""
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+    if not trip:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trip not found"
+        )
+    
+    try:
+        # Check if weather API key is configured (Google Maps API key or OpenWeatherMap)
+        if not settings.google_maps_api_key and not settings.openweather_api_key:
+            logger.error("Weather API key is not configured. Please configure either GOOGLE_MAPS_API_KEY or OPENWEATHER_API_KEY")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Weather service is not available. Please configure GOOGLE_MAPS_API_KEY (preferred) or OPENWEATHER_API_KEY in environment variables."
+            )
+        
+        # Get coordinates for destination
+        logger.info(f"Geocoding destination: {trip.destination}")
+        coordinates = await google_maps_service.geocode_address(trip.destination)
+        if not coordinates:
+            logger.error(f"Could not geocode destination: {trip.destination}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not geocode destination: {trip.destination}"
+            )
+        
+        logger.info(f"Coordinates for {trip.destination}: {coordinates}")
+        
+        # Check if we have cached weather for the entire trip
+        cache_key = "trip_weather_forecast"
+        cached_weather_forecast = await content_cache_service.get(trip_id, cache_key)
+        
+        # If not cached or cache expired, fetch weather for entire trip duration
+        if not cached_weather_forecast:
+            logger.info(f"Fetching weather forecast for {trip.destination} for entire trip duration ({trip.start_date.date()} to {trip.end_date.date()})")
+            
+            # Fetch weather forecast for the entire trip period
+            try:
+                weather_forecast_data = await smart_adjustments_service._fetch_weather_forecast_for_period(
+                    coordinates=coordinates,
+                    start_date=trip.start_date,
+                    end_date=trip.end_date
+                )
+            except Exception as e:
+                logger.error(f"Error calling _fetch_weather_forecast_for_period: {e}", exc_info=True)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error fetching weather data: {str(e)}"
+                )
+            
+            # Cache the forecast for 6 hours (forecast data updates frequently)
+            if weather_forecast_data:
+                logger.info(f"Successfully fetched weather forecast. Organizing by date...")
+                await content_cache_service.store(
+                    trip_id=trip_id,
+                    content_type=cache_key,
+                    content=weather_forecast_data,
+                    ttl_hours=6
+                )
+                cached_weather_forecast = weather_forecast_data
+            else:
+                api_name = "Google Weather API" if settings.google_maps_api_key else "OpenWeatherMap API"
+                logger.warning(f"Failed to fetch weather forecast for {trip.destination} - API returned None")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to fetch weather data for destination: {trip.destination}. Please check {api_name} key and connectivity."
+                )
+        
+        # Process all weather data for the trip period
+        forecast_by_date = cached_weather_forecast.get("forecast_by_date", {})
+        logger.info(f"Processing weather data. Found {len(forecast_by_date)} dates in forecast cache")
+        
+        if not forecast_by_date:
+            logger.warning("No weather forecast data found in cache. This may indicate an issue with the API response.")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"No weather forecast data available for {trip.destination}. Please try again later."
+            )
+        
+        total_days = (trip.end_date - trip.start_date).days + 1
+        
+        weather_updates = []
+        for day_number in range(1, total_days + 1):
+            target_date = trip.start_date + timedelta(days=day_number - 1)
+            date_key = target_date.date().isoformat()
+            
+            day_weather = forecast_by_date.get(date_key)
+            
+            # If exact date not found, use closest forecast
+            if not day_weather and forecast_by_date:
+                target_date_obj = target_date.date()
+                try:
+                    # Helper function to safely parse date keys
+                    def parse_date_key(key):
+                        if isinstance(key, str):
+                            # Try parsing as ISO format date string
+                            try:
+                                return datetime.fromisoformat(key).date()
+                            except (ValueError, AttributeError):
+                                # If that fails, try just date parsing
+                                try:
+                                    return datetime.strptime(key, "%Y-%m-%d").date()
+                                except ValueError:
+                                    return None
+                        return key
+                    
+                    # Find closest date
+                    valid_dates = [(k, parse_date_key(k)) for k in forecast_by_date.keys() if parse_date_key(k)]
+                    if valid_dates:
+                        closest_date_key = min(
+                            valid_dates,
+                            key=lambda x: abs((x[1] - target_date_obj).days) if x[1] else float('inf')
+                        )[0]
+                        day_weather = forecast_by_date.get(closest_date_key)
+                        logger.debug(f"Using closest forecast for day {day_number}: {closest_date_key}")
+                except Exception as e:
+                    logger.warning(f"Error finding closest forecast date: {e}")
+                    day_weather = None
+            
+            # Fallback: fetch weather directly for this day if cached data unavailable
+            if not day_weather:
+                logger.info(f"Fetching weather directly for {trip.destination} on {target_date.date()}")
+                day_weather = await smart_adjustments_service._fetch_weather_data(coordinates, target_date)
+            
+            if day_weather:
+                # Calculate temperature range
+                temp = day_weather.get("temperature", 0)
+                feels_like = day_weather.get("feels_like", temp)
+                min_temp = min(temp, feels_like) - 2
+                max_temp = max(temp, feels_like) + 3
+                
+                # Format condition text
+                condition = day_weather.get("condition", "clear").title()
+                description = day_weather.get("description", "")
+                description_text = description.title() if description else ""
+                
+                # Create formatted weather summary
+                month_name = target_date.strftime("%B")
+                condition_text = f"Likely {condition}"
+                if description_text:
+                    condition_text += f" - {description_text}"
+                condition_text += f", Typical For {month_name}."
+                
+                # Add additional context based on weather
+                if day_weather.get("rain", 0) > 0:
+                    condition_text += " Potential For Rain."
+                if day_weather.get("wind_speed", 0) > 10:
+                    condition_text += " Windy Conditions Expected."
+                elif day_weather.get("clouds", 0) > 50:
+                    condition_text += " Cloudy Skies Possible."
+                
+                # Create recommendations
+                recommendations = []
+                if temp > 30:
+                    recommendations.append("Stay hydrated and seek shade during peak hours.")
+                    recommendations.append("Pack light, breathable clothing. Sun protection is crucial.")
+                elif temp < 15:
+                    recommendations.append("Dress in layers. Carry warm clothing.")
+                else:
+                    recommendations.append("Pack light, breathable clothing. Sun protection recommended.")
+                
+                if day_weather.get("rain", 0) > 0:
+                    recommendations.append("Carry an umbrella or rain gear.")
+                if day_weather.get("wind_speed", 0) > 10:
+                    recommendations.append("Secure loose items. Wind-resistant clothing recommended.")
+                
+                weather_summary = {
+                    "temperature_range": f"{int(min_temp)}-{int(max_temp)}°C",
+                    "condition": condition_text,
+                    "recommendations": " ".join(recommendations),
+                    "temperature": temp,
+                    "condition_keyword": condition.lower(),
+                    "description": description
+                }
+                
+                weather_updates.append({
+                    "day_number": day_number,
+                    "date": target_date.isoformat(),
+                    "coordinates": coordinates,
+                    "place_name": trip.destination,
+                    "location": trip.destination,
+                    "weather_data": day_weather,
+                    "weather_summary": weather_summary
+                })
+        
+        return {
+            "trip_id": trip_id,
+            "destination": trip.destination,
+            "start_date": trip.start_date.isoformat(),
+            "end_date": trip.end_date.isoformat(),
+            "weather_updates": weather_updates,
+            "count": len(weather_updates)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching trip weather: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching trip weather: {str(e)}"
+        )
+
+
 @router.get("/{trip_id}/day-weather/{day_number}", response_model=Dict[str, Any])
 async def get_day_weather(
     trip_id: str,
     day_number: int,
     db: Session = Depends(get_db)
 ):
-    """Get weather data for destination - fetches once for entire trip duration and caches it"""
+    """Get weather data for destination for a specific day - fetches once for entire trip duration and caches it"""
     trip = db.query(Trip).filter(Trip.id == trip_id).first()
     if not trip:
         raise HTTPException(
@@ -1680,8 +2313,6 @@ async def get_day_weather(
             logger.info(f"Fetching weather forecast for {trip.destination} for entire trip duration")
             
             # Fetch weather forecast for the entire trip period
-            # OpenWeatherMap forecast API provides 5-day forecast, so we'll get forecast for start date
-            # and if needed, we can fetch additional forecasts
             weather_forecast_data = await smart_adjustments_service._fetch_weather_forecast_for_period(
                 coordinates=coordinates,
                 start_date=trip.start_date,
@@ -1960,6 +2591,27 @@ async def get_day_packing(
         cache_key = "trip_weather_forecast"
         cached_weather_forecast = await content_cache_service.get(trip_id, cache_key)
         
+        # If not cached or cache expired, fetch weather for entire trip duration
+        if not cached_weather_forecast:
+            logger.info(f"Fetching weather forecast for {trip.destination} for entire trip duration (from packing endpoint)")
+            
+            # Fetch weather forecast for the entire trip period
+            weather_forecast_data = await smart_adjustments_service._fetch_weather_forecast_for_period(
+                coordinates=coordinates,
+                start_date=trip.start_date,
+                end_date=trip.end_date
+            )
+            
+            # Cache the forecast for 6 hours (forecast data updates frequently)
+            if weather_forecast_data:
+                await content_cache_service.store(
+                    trip_id=trip_id,
+                    content_type=cache_key,
+                    content=weather_forecast_data,
+                    ttl_hours=6
+                )
+                cached_weather_forecast = weather_forecast_data
+        
         # Get weather for this specific day
         day_weather = None
         if cached_weather_forecast and isinstance(cached_weather_forecast, dict):
@@ -1978,6 +2630,7 @@ async def get_day_packing(
         
         # Fallback: fetch weather directly for this day if cached data unavailable
         if not day_weather:
+            logger.info(f"Fetching weather directly for {trip.destination} on {target_date.date()} (from packing endpoint)")
             day_weather = await smart_adjustments_service._fetch_weather_data(coordinates, target_date)
         
         # Format weather data for packing API

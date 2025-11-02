@@ -256,10 +256,14 @@ export const tripService = {
     }
   },
 
-  // Get trip itinerary
-  getTripItinerary: async (tripId) => {
+  // Get trip itinerary with optional language
+  getTripItinerary: async (tripId, language = "english") => {
     try {
-      const response = await api.get(`/trips/${tripId}/itinerary`);
+      const params = {};
+      if (language && language !== "english") {
+        params.language = language;
+      }
+      const response = await api.get(`/trips/${tripId}/itinerary`, { params });
       return response.data;
     } catch (error) {
       console.error("Error fetching trip itinerary:", error);
@@ -330,10 +334,15 @@ export const tripService = {
     }
   },
 
-  // Get transport details (local/city transport) based on budget and total days
-  getTransportDetails: async (tripId) => {
+  // Get transport details (local/city transport) based on budget and total days with optional language
+  getTransportDetails: async (tripId, language = "english") => {
     try {
+      const params = {};
+      if (language && language !== "english") {
+        params.language = language;
+      }
       const response = await api.get(`/trips/${tripId}/transport-details`, {
+        params,
         timeout: 120000, // 2 minutes timeout for AI generation
       });
       return response.data;
@@ -474,7 +483,18 @@ export const tripService = {
     }
   },
 
-  // Get weather data for all places in a specific day's itinerary
+  // Get weather data for entire trip period
+  getTripWeather: async (tripId) => {
+    try {
+      const response = await api.get(`/trips/${tripId}/weather`);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching trip weather:", error);
+      throw error;
+    }
+  },
+
+  // Get weather data for a specific day (kept for backward compatibility)
   getDayWeather: async (tripId, dayNumber) => {
     try {
       const response = await api.get(`/trips/${tripId}/day-weather/${dayNumber}`);

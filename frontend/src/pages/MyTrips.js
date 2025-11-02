@@ -79,12 +79,31 @@ export default function MyTrips() {
 
   const fetchTrips = async () => {
     setLoading(true);
+    setError(null);
     try {
       const userTrips = await tripService.listTrips();
-      setTrips(userTrips);
+      console.log("Fetched trips:", userTrips);
+      console.log("Trips array length:", Array.isArray(userTrips) ? userTrips.length : "Not an array");
+      // Ensure we're setting an array
+      if (Array.isArray(userTrips)) {
+        setTrips(userTrips);
+      } else {
+        console.warn("API response is not an array:", userTrips);
+        // If response is wrapped in an object, try to extract the array
+        if (userTrips && userTrips.trips && Array.isArray(userTrips.trips)) {
+          setTrips(userTrips.trips);
+        } else if (userTrips && userTrips.data && Array.isArray(userTrips.data)) {
+          setTrips(userTrips.data);
+        } else {
+          setTrips([]);
+          setError("Invalid response format from server.");
+        }
+      }
     } catch (err) {
       console.error("Error fetching trips:", err);
-      setError("Failed to load trips.");
+      console.error("Error details:", err.response?.data || err.message);
+      setError("Failed to load trips. Please check your connection.");
+      setTrips([]);
     } finally {
       setLoading(false);
     }
@@ -176,6 +195,13 @@ export default function MyTrips() {
             {t("planNewTrip")}
           </Button>
         </div>
+
+        {/* Error Message */}
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+            <p className="text-red-800">{error}</p>
+          </div>
+        )}
 
         {/* Stats Cards */}
         {trips.length > 0 && (
